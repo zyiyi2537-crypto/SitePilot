@@ -1,0 +1,26 @@
+[Unit]
+Description=SitePilot API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sitepilot
+Group=sitepilot
+WorkingDirectory=/opt/sitepilot
+EnvironmentFile=/etc/sitepilot/sitepilot.env
+ExecStart=/usr/bin/node /opt/sitepilot/src/server.js
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sitepilot /var/lib/sitepilot-worktrees /var/lib/sitepilot-quarantine
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=4096
+MemoryMax=768M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

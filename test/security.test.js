@@ -1,0 +1,104 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { Readable } from "node:stream";
+import fs from "node:fs/promises";
+
+import { SitePilotStore } from "../src/core.js";
+import { createServer } from "../src/server.js";
+import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
+
+function request(server, method, url, token, body) {
+  return new Promise((resolve, reject) => {
+    const req = Readable.from(body === undefined ? [] : [JSON.stringify(body)]);
+    req.method = method;
+    req.url = url;
+    req.headers = token ? { authorization: `Bearer ${token}` } : {};
+    const res = {
+      writeHead(status) { this.status = status; },
+      end(text) { resolve({ status: this.status, body: JSON.parse(text) }); },
+    };
+    server.emit("request", req, res);
+    req.on("error", reject);
+  });
+}
+
+test("HTTP API rejects anonymous writes and exposes no quality decision route", async () => {
+  const store = new SitePilotStore();
+  const server = createServer(store, { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const anonymous = await request(server, "POST", "/projects", null, { goal: "test" });
+  assert.equal(anonymous.status, 401);
+  const quality = await request(server, "POST", "/candidates/fake/quality", "a".repeat(32), { passed: true });
+  assert.equal(quality.status, 404);
+  assert.equal(store.candidates.size, 0);
+});
+
+test("review requires separate credential and uses server-side reviewer identity", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "test" });
+  const run = store.createRun(project.id);
+  const candidate = store.createCandidate(run.id, {});
+  store.markQuality(candidate.id, { passed: true });
+  const server = createServer(store, { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const route = `/candidates/${candidate.id}/review`;
+  assert.equal((await request(server, "POST", route, "a".repeat(32), { approved: true })).status, 401);
+  assert.equal((await request(server, "POST", route, "b".repeat(32), { approved: false })).status, 422);
+  const approved = await request(server, "POST", route, "b".repeat(32), { approved: true, approvedByReviewer: "attacker" });
+  assert.equal(approved.status, 201);
+  assert.equal(approved.body.review.approvedByReviewer, "reviewer-1");
+});
+
+test("evidence API records sources, citations and claims under the project", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "evidence" });
+  const token = "a".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const source = await request(server, "POST", `/projects/${project.id}/sources`, token, { kind: "client", name: "facts.md", content: "Founded in 2020", version: "1" });
+  assert.equal(source.status, 201);
+  const record = await request(server, "POST", `/sources/${source.body.id}/records`, token, { locator: "line:1", quote: "Founded in 2020" });
+  assert.equal(record.status, 201);
+  const claim = await request(server, "POST", `/projects/${project.id}/claims`, token, { statement: "The company was founded in 2020", evidenceIds: [record.body.id] });
+  assert.equal(claim.status, 201);
+  assert.equal(claim.body.status, "proposed");
+});
+
+test("run creation returns a bounded Payload schema plan", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "industrial website", industry: "industrial" });
+  const token = "a".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const response = await request(server, "POST", `/projects/${project.id}/runs`, token, {});
+  assert.equal(response.status, 201);
+  assert.equal(response.body.payloadSchema.rules.publishAllowed, false);
+  assert.ok(response.body.payloadSchema.collections.some((item) => item.name === "products"));
+});
+
+test("Docker sandbox command has enforced network, filesystem and user isolation", async () => {
+  let invocation;
+  const sandbox = new DockerSandboxRunner({
+    image: `node@sha256:${"a".repeat(64)}`,
+    runner: async (command, args) => { invocation = { command, args }; return { stdout: "ok" }; },
+  });
+  await sandbox.run("node", ["--version"], { cwd: "/tmp/sitepilot-worktree-fixture", timeout: 1000, maxBuffer: 1024 });
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["run", "--rm", "--network", "none", "--read-only", "--cap-drop"]);
+  assert.ok(invocation.args.includes("--user"));
+  assert.ok(invocation.args.includes("no-new-privileges"));
+  assert.ok(invocation.args.includes("--pids-limit"));
+  assert.ok(invocation.args.includes("--memory"));
+});
+
+test("API refuses configuration with weak or shared credentials", async () => {
+  const server = createServer(new SitePilotStore(), { apiToken: "short", reviewerToken: "short", reviewerId: "reviewer-1" });
+  assert.equal((await request(server, "POST", "/projects", "short", { goal: "x" })).status, 503);
+});
+
+test("build refuses worktree symlink escaping its configured root", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-sandbox-root-");
+  const outside = await fs.mkdtemp("/tmp/sitepilot-sandbox-outside-");
+  await fs.symlink(outside, `${root}/linked`);
+  let called = false;
+  const sandbox = new DockerSandboxRunner({ image: `node@sha256:${"a".repeat(64)}`, runner: async () => { called = true; return { stdout: "" }; } });
+  const executor = new BuildExecutor({ worktreeRoot: root, approvedScripts: { check: { command: "node", args: ["--check", "app.js"] } }, sandbox });
+  await assert.rejects(() => executor.run({ candidateId: "candidate_1", worktreePath: "linked", commit: "a".repeat(40), approvedScriptIds: ["check"], grant: { level: "L2" } }), /outside configured root/);
+  assert.equal(called, false);
+});

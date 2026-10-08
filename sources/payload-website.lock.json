@@ -1,0 +1,31 @@
+{
+  "sourceId": "payload-website-template",
+  "repositoryId": "payloadcms-payload",
+  "repositoryUrl": "https://github.com/payloadcms/payload.git",
+  "commit": "31ba7ee8271998ad7aa8963111764cbacf37b157",
+  "path": "templates/website",
+  "licenseFiles": ["templates/website/package.json", "LICENSE.md"],
+  "expectedLicense": "MIT",
+  "requiredFiles": ["templates/website/package.json", "templates/website/README.md", "templates/website/src"],
+  "fetchPolicy": {
+    "requireFullCommit": true,
+    "followBranches": false,
+    "allowSubmodules": false,
+    "allowSymlinks": false,
+    "allowGitHooks": false,
+    "maxBytes": 262144000
+  },
+  "verification": "verified-scoped-source",
+  "includePaths": ["templates/website", "packages", "LICENSE.md", "package.json", "pnpm-workspace.yaml", "pnpm-lock.yaml", ".node-version", ".nvmrc", "tsconfig.json"],
+  "templateManifestHash": "8c04604e142e9f6655d233aac2d37df600a7809897076757a51046521f58caae",
+  "sourceTreeManifestHash": "cc9d4f3a467982758a7ebd2af936a2804583726fde96b35d8ee83a3f0c974f6c",
+  "archiveHash": "86a25c8fd25436f0d46f4986b52552c4dd83298515934dc3ff9a75ce70a0953e",
+  "templateFileCount": 201,
+  "sourceTreeFileCount": 4881,
+  "sourceTreeSizeBytes": 26606826,
+  "verifiedMetadata": {
+    "templates/website/package.json": "0683854365a59ce6e5813bed9193ef29e382d1a677612335b9d9663027d12a27",
+    "templates/website/README.md": "d7b91f97509e2b82a7edfd10f8bd39f987054b82aec9ca164f74f5d3b3d988bd",
+    "LICENSE.md": "467deba7e5f01116cc92ca147cb18256216f3bc3b389fe8c6180b7c2d6cc082d"
+  }
+}
