@@ -8,7 +8,7 @@ import { BlockRegistry } from "./registry.js";
 import { researchComponents } from "./research-agent.js";
 import { composePagePlan } from "./page-composer.js";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
   const reviewerId = auth.reviewerId ?? process.env.SITEPILOT_REVIEWER_ID ?? "";
@@ -128,6 +128,18 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const candidate = store.createCandidate(run.id, await readJson(req));
         run.checkpoint = "candidate_ready";
         return send(res, 201, candidate);
+      }
+      const payloadMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-draft$/);
+      if (req.method === "POST" && payloadMatch) {
+        if (!payload || typeof payload.createDraft !== "function") return send(res, 503, { code: "PAYLOAD_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(payloadMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (!candidate.quality?.passed) return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
+        const input = await readJson(req);
+        const receipt = await payload.createDraft({ ...input, candidateId: candidate.id, environment: "sandbox" });
+        candidate.cmsSnapshot = receipt;
+        store.event(candidate.runId, "payload.draft.created", { candidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
+        return send(res, 201, receipt);
       }
       if (req.method === "POST" && reviewMatch) {
         const candidate = store.candidates.get(reviewMatch[1]);

@@ -101,6 +101,22 @@ test("page plan endpoint only returns plans after registry approval", async () =
   assert.equal(planned.body.writesAllowed, false);
 });
 
+test("Payload API only creates sandbox drafts after quality gates", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const calls = [];
+  const payload = { createDraft: async (input) => { calls.push(input); return { candidateId: input.candidateId, cmsSnapshotId: "payload_1", status: "sandbox_draft" }; } };
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, payload);
+  const project = store.createProject({ goal: "website" });
+  const run = store.createRun(project.id);
+  const candidate = store.createCandidate(run.id, {});
+  assert.equal((await request(server, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "k", pageOperations: [] })).status, 422);
+  store.markQuality(candidate.id, { passed: true });
+  const result = await request(server, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "k", pageOperations: [] });
+  assert.equal(result.status, 201);
+  assert.equal(calls[0].environment, "sandbox");
+});
+
 test("evidence API records sources, citations and claims under the project", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "evidence" });
