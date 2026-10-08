@@ -23,6 +23,16 @@ npm run check
 npm start
 ```
 
+Run the dependency-free Research -> review -> code -> build-gate slice locally:
+
+```bash
+npm run local:demo
+```
+
+`local:demo` uses an explicit in-process CodeAtlas fixture and a local reviewer identity. It creates a temporary worktree, stops once for component review, then generates the page and validates `src/generated/sitepilot-manifest.json`. It does not call the network, Payload, Docker, or GitHub. Set `SITEPILOT_KEEP_LOCAL_WORKTREE=1` when inspecting the generated files after the command exits.
+
+The production-shaped flow is assembled from the same modules: configure the read-only CodeAtlas adapter, run `researchComponents`, approve registry blocks with license and test evidence, call `runLocalCodePipeline` with an L2 grant, and only then expose the generated worktree to preview/build adapters. The pipeline now invokes the generated-candidate build gate before returning `status: "generated"`.
+
 The default worktree root is `/tmp/sitepilot-worktrees`. A deployment must set `SITEPILOT_WORKTREE_ROOT` to an administrator-owned absolute directory. The model cannot supply or override this path.
 
 The API fails closed until distinct `SITEPILOT_API_TOKEN`, `SITEPILOT_REVIEW_TOKEN`, and `SITEPILOT_REVIEWER_ID` values are configured. The reviewer token is accepted only for the review route. Do not expose the API over plain HTTP outside localhost; terminate TLS at the reverse proxy.
