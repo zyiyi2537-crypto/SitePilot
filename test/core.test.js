@@ -22,6 +22,7 @@ import { createPinnedSourceFetcher, PINNED_SOURCES } from "../src/pinned-sources
 import { planPayloadSchema } from "../src/payload-schema.js";
 import { planComponents } from "../src/component-planner.js";
 import { composePagePlan } from "../src/page-composer.js";
+import { researchComponents } from "../src/research-agent.js";
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -286,6 +287,25 @@ test("page composer only uses approved registry components", () => {
   assert.deepEqual(plan.files, ["src/app/(site)/home/page.tsx", "src/app/(site)/contact/page.tsx"]);
   assert.equal(plan.routes[0].components[0].source.commit, commit);
   assert.throws(() => composePagePlan({ registry, strategy: { pageHierarchy: ["home"], blocks: ["ContactForm"] } }), /not approved/);
+});
+
+test("research agent searches every strategy block at a frozen commit", async () => {
+  const commit = "b".repeat(40);
+  const calls = [];
+  const result = await researchComponents({
+    adapter: {
+      search: async (input) => {
+        calls.push(input);
+        return [{ repository: input.repository, commit, path: `src/${calls.length}.tsx`, locator: { startLine: 1, endLine: 8 }, licenseReference: "MIT", evidenceId: `e${calls.length}` }];
+      },
+    },
+    strategy: { blocks: ["Hero", "ContactForm"], locales: ["zh-CN", "en"] },
+    repository: "payload",
+    expectedCommit: commit,
+  });
+  assert.deepEqual(calls.map((call) => call.expectedCommit), [commit, commit]);
+  assert.deepEqual(result.componentPlan.components.map((item) => item.status), ["candidate", "candidate"]);
+  assert.equal(result.evidence.length, 2);
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {
