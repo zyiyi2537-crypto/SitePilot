@@ -4,8 +4,9 @@ import { SitePilotStore, planStrategy } from "./core.js";
 import { JsonSitePilotStore } from "./persistence.js";
 import { EvidenceStore } from "./evidence.js";
 import { planPayloadSchema } from "./payload-schema.js";
+import { BlockRegistry } from "./registry.js";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore()) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry()) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
   const reviewerId = auth.reviewerId ?? process.env.SITEPILOT_REVIEWER_ID ?? "";
@@ -34,7 +35,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (apiToken.length < 32 || reviewerToken.length < 32 || !reviewerId || apiToken === reviewerToken) return send(res, 503, { code: "AUTH_NOT_CONFIGURED", message: "Distinct 32-character API and reviewer credentials are required" });
       const authorization = req.headers.authorization || "";
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
-      const requiredToken = req.method === "POST" && reviewMatch ? reviewerToken : apiToken;
+      const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
+      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch) ? reviewerToken : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       const sourceMatch = url.pathname.match(/^\/projects\/([^/]+)\/sources$/);
       if (req.method === "POST" && sourceMatch) {
@@ -45,6 +47,18 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (req.method === "POST" && evidenceMatch) return send(res, 201, evidence.addRecord({ ...(await readJson(req)), sourceId: evidenceMatch[1] }));
       const claimMatch = url.pathname.match(/^\/projects\/([^/]+)\/claims$/);
       if (req.method === "POST" && claimMatch) return send(res, 201, evidence.createClaim({ ...(await readJson(req)), projectId: claimMatch[1] }));
+      if (req.method === "GET" && url.pathname === "/components") return send(res, 200, { registry: registry.manifest() });
+      if (req.method === "POST" && url.pathname === "/components") return send(res, 201, registry.register(await readJson(req)));
+      if (req.method === "POST" && blockReviewMatch) {
+        const decision = await readJson(req);
+        if (decision.approved !== true) return send(res, 422, { code: "REVIEW_NOT_APPROVED" });
+        return send(res, 200, registry.transition(blockReviewMatch[1], "approved", {
+          reviewerId,
+          licenseVerified: decision.licenseVerified === true,
+          testsPassed: decision.testsPassed === true,
+          notes: decision.notes || "",
+        }));
+      }
       if (req.method === "POST" && url.pathname === "/projects") {
         const project = store.createProject(await readJson(req));
         return send(res, 201, project);

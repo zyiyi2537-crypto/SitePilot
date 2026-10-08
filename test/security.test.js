@@ -49,6 +49,23 @@ test("review requires separate credential and uses server-side reviewer identity
   assert.equal(approved.body.review.approvedByReviewer, "reviewer-1");
 });
 
+test("component registry review requires reviewer credential and evidence", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const reviewer = "b".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: reviewer, reviewerId: "reviewer-1" });
+  const commit = "a".repeat(40);
+  const created = await request(server, "POST", "/components", token, { name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT" });
+  assert.equal(created.status, 201);
+  const id = created.body.id;
+  assert.equal((await request(server, "POST", `/components/${id}/review`, token, { approved: true, licenseVerified: true, testsPassed: true })).status, 401);
+  assert.equal((await request(server, "POST", `/components/${id}/review`, reviewer, { approved: true, licenseVerified: true, testsPassed: false })).status, 422);
+  const approved = await request(server, "POST", `/components/${id}/review`, reviewer, { approved: true, licenseVerified: true, testsPassed: true, reviewerId: "attacker" });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.body.state, "approved");
+  assert.equal(approved.body.review.reviewerId, "reviewer-1");
+});
+
 test("evidence API records sources, citations and claims under the project", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "evidence" });
