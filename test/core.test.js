@@ -57,6 +57,23 @@ test("candidate cannot become draft before quality and review", () => {
   assert.equal(draft.status, "ready_for_review");
 });
 
+test("answering strategy questions creates a new immutable run", () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "build a website" });
+  const first = store.createRun(project.id);
+  const revised = store.reviseRun(first.id, {
+    audience: "procurement teams",
+    primaryConversion: "request a quote",
+    brandConstraints: ["blue and white"],
+    contentAvailable: ["product catalog"],
+  });
+  assert.equal(first.status, "superseded");
+  assert.equal(first.supersededByRunId, revised.id);
+  assert.equal(revised.revisedFromRunId, first.id);
+  assert.equal(revised.inputSnapshot.primaryConversion, "request a quote");
+  assert.notEqual(first.inputSnapshot.primaryConversion, revised.inputSnapshot.primaryConversion);
+});
+
 test("worktree policy blocks escape and sensitive files", async () => {
   const policy = new WorktreePolicy(path.resolve("/tmp/sitepilot-test-worktree"));
   assert.throws(() => policy.validateRelative("../outside"), PolicyError);

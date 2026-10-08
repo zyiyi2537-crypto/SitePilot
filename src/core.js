@@ -62,10 +62,10 @@ export class SitePilotStore {
       goal: project.goal,
       industry: project.industry,
       locale: project.locale,
-      audience: project.audience,
-      primaryConversion: project.primaryConversion,
-      brandConstraints: project.brandConstraints,
-      contentAvailable: project.contentAvailable,
+      audience: inputSnapshot.audience ?? project.audience,
+      primaryConversion: inputSnapshot.primaryConversion ?? project.primaryConversion,
+      brandConstraints: inputSnapshot.brandConstraints ?? project.brandConstraints,
+      contentAvailable: inputSnapshot.contentAvailable ?? project.contentAvailable,
       constraints: project.constraints,
       templateBaseCommit: inputSnapshot.templateBaseCommit || "payload-website-template:31ba7ee8271998ad7aa8963111764cbacf37b157",
       blockRegistryVersion: inputSnapshot.blockRegistryVersion || "registry-v0",
@@ -81,6 +81,28 @@ export class SitePilotStore {
     this.runs.set(run.id, run);
     this.event(run.id, "run.created", { snapshotHash: hash(snapshot) });
     return run;
+  }
+
+  reviseRun(runId, answers = {}) {
+    const previous = this.runs.get(runId);
+    if (!previous) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    if (previous.candidateIds.length) throw new PolicyError("A run with candidates cannot be revised", "POLICY_DENIED");
+    const allowed = ["audience", "primaryConversion", "brandConstraints", "contentAvailable"];
+    const inputSnapshot = Object.fromEntries(
+      allowed.map((key) => [key, answers[key] ?? previous.inputSnapshot[key]]),
+    );
+    const next = this.createRun(previous.projectId, {
+      ...inputSnapshot,
+      templateBaseCommit: previous.inputSnapshot.templateBaseCommit,
+      blockRegistryVersion: previous.inputSnapshot.blockRegistryVersion,
+      repositoryAllowlist: previous.inputSnapshot.repositoryAllowlist,
+      modelVersion: previous.inputSnapshot.modelVersion,
+    });
+    next.revisedFromRunId = previous.id;
+    previous.status = "superseded";
+    previous.supersededByRunId = next.id;
+    this.event(next.id, "run.revised", { revisedFromRunId: previous.id });
+    return next;
   }
 
   task(runId, role, kind, input) {

@@ -64,6 +64,24 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.event(run.id, "strategy.created", { strategy: strategy.strategy });
         return send(res, 201, run);
       }
+      const answersMatch = url.pathname.match(/^\/runs\/([^/]+)\/answers$/);
+      if (req.method === "POST" && answersMatch) {
+        const run = store.runs.get(answersMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const revised = store.reviseRun(run.id, await readJson(req));
+        const project = store.projects.get(revised.projectId);
+        revised.strategy = planStrategy({
+          ...project,
+          ...revised.inputSnapshot,
+        });
+        revised.payloadSchema = planPayloadSchema({
+          projectId: project.id,
+          strategy: revised.strategy,
+          locales: revised.inputSnapshot.locale,
+        });
+        revised.checkpoint = "strategy_ready";
+        return send(res, 201, revised);
+      }
       const candidateRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/candidates$/);
       if (req.method === "POST" && candidateRunMatch) {
         const run = store.runs.get(candidateRunMatch[1]);

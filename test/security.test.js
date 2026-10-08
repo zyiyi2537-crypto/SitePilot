@@ -72,6 +72,21 @@ test("run creation returns a bounded Payload schema plan", async () => {
   assert.ok(response.body.payloadSchema.collections.some((item) => item.name === "products"));
 });
 
+test("strategy answers return a new run instead of mutating history", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "website" });
+  const first = store.createRun(project.id);
+  const token = "a".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const response = await request(server, "POST", `/runs/${first.id}/answers`, token, {
+    audience: "buyers", primaryConversion: "contact sales", brandConstraints: ["logo"], contentAvailable: ["catalog"],
+  });
+  assert.equal(response.status, 201);
+  assert.equal(response.body.revisedFromRunId, first.id);
+  assert.equal(response.body.strategy.openQuestions.length, 0);
+  assert.equal(store.runs.get(first.id).status, "superseded");
+});
+
 test("Docker sandbox command has enforced network, filesystem and user isolation", async () => {
   let invocation;
   const sandbox = new DockerSandboxRunner({
