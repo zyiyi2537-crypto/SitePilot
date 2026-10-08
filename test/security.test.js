@@ -8,6 +8,7 @@ import { createServer } from "../src/server.js";
 import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
+import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -64,6 +65,23 @@ test("component registry review requires reviewer credential and evidence", asyn
   assert.equal(approved.status, 200);
   assert.equal(approved.body.state, "approved");
   assert.equal(approved.body.review.reviewerId, "reviewer-1");
+});
+
+test("run research uses server-side CodeAtlas adapter and freezes requested commit", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const commit = "c".repeat(40);
+  const codeAtlas = new CodeAtlasMcpAdapter({ repositories: ["payload"], transport: new FixtureCodeAtlasTransport({
+    search_code: () => [{ repository: "payload", commit, path: "src/Hero.tsx", license_reference: "MIT" }],
+  }) });
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, codeAtlas);
+  const project = store.createProject({ goal: "website", industry: "general", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  const response = await request(server, "POST", `/runs/${run.id}/research`, token, { repository: "payload", expectedCommit: commit });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.componentPlan.requiresReview, true);
+  assert.equal(store.runs.get(run.id).checkpoint, "components_pending_review");
 });
 
 test("evidence API records sources, citations and claims under the project", async () => {

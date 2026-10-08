@@ -332,6 +332,18 @@ test("code generator materializes only a valid page plan with L2 grant", async (
   await assert.rejects(() => materializePagePlan({ plan, worktree: { applyPatch: async () => ({ files: [] }) } }), /L2 grant/);
 });
 
+test("code generator records frozen CodeAtlas source files", async () => {
+  const commit = "d".repeat(40);
+  const registry = new BlockRegistry();
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const plan = composePagePlan({ registry, strategy: { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] } });
+  const writes = {};
+  await materializePagePlan({ plan, grant: { level: "L2" }, worktree: { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } }, sourceResolver: async () => ({ repository: "payload", commit, path: "src/Hero.tsx", content: "export default function Hero() {}" }) });
+  assert.ok(writes["src/generated/sources/payload-src_Hero.tsx"]);
+  assert.match(writes["src/generated/sitepilot-manifest.json"], /"sources"/);
+});
+
 test("local pipeline stops for review and generates after approved evidence", async () => {
   const commit = "c".repeat(40);
   const strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN"] };

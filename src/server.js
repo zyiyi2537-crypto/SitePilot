@@ -5,8 +5,9 @@ import { JsonSitePilotStore } from "./persistence.js";
 import { EvidenceStore } from "./evidence.js";
 import { planPayloadSchema } from "./payload-schema.js";
 import { BlockRegistry } from "./registry.js";
+import { researchComponents } from "./research-agent.js";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry()) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
   const reviewerId = auth.reviewerId ?? process.env.SITEPILOT_REVIEWER_ID ?? "";
@@ -95,6 +96,19 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         });
         revised.checkpoint = "strategy_ready";
         return send(res, 201, revised);
+      }
+      const researchMatch = url.pathname.match(/^\/runs\/([^/]+)\/research$/);
+      if (req.method === "POST" && researchMatch) {
+        if (!codeAtlas || typeof codeAtlas.search !== "function") return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
+        const run = store.runs.get(researchMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const input = await readJson(req);
+        if (typeof input.repository !== "string" || typeof input.expectedCommit !== "string") return send(res, 422, { code: "INVALID_INPUT", message: "repository and expectedCommit are required" });
+        const result = await researchComponents({ strategy: run.strategy, adapter: codeAtlas, registry, projectId: run.projectId, repository: input.repository, expectedCommit: input.expectedCommit, topK: input.topK });
+        run.research = result;
+        run.checkpoint = result.componentPlan.requiresReview ? "components_pending_review" : "components_approved";
+        store.event(run.id, "research.completed", { repository: result.repository, commit: result.commit, evidenceCount: result.evidence.length, requiresReview: result.componentPlan.requiresReview });
+        return send(res, 200, result);
       }
       const candidateRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/candidates$/);
       if (req.method === "POST" && candidateRunMatch) {
