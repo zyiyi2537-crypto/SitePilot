@@ -7,6 +7,7 @@ import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
 import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
+import { validateGeneratedCandidate } from "../src/local-build.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -114,6 +115,22 @@ test("local preview is localhost-only and read-only", () => {
   assert.equal(preview.host, "127.0.0.1");
   assert.equal(preview.plan.routes[0].components[0].source.commit.length, 40);
   assert.throws(() => new LocalPreviewServer({ plan, host: "0.0.0.0" }), /localhost/);
+});
+
+test("local build gate validates generated manifest and page files", async () => {
+  const root = "/tmp/sitepilot-local-build-gate";
+  await fs.rm(root, { recursive: true, force: true });
+  await fs.mkdir(`${root}/src/generated`, { recursive: true });
+  await fs.mkdir(`${root}/src/app/(site)/home`, { recursive: true });
+  const routes = [{ page: "home", route: "/", file: "src/app/(site)/home/page.tsx", components: [] }];
+  const crypto = await import("node:crypto");
+  const sourceManifestHash = crypto.createHash("sha256").update(JSON.stringify(routes)).digest("hex");
+  await fs.writeFile(`${root}/src/generated/sitepilot-manifest.json`, JSON.stringify({ routes, sourceManifestHash }));
+  await fs.writeFile(`${root}/src/app/(site)/home/page.tsx`, '<main data-sitepilot-page="home" />');
+  const result = await validateGeneratedCandidate({ worktreeRoot: root });
+  assert.equal(result.passed, true);
+  assert.equal(result.routeCount, 1);
+  await fs.rm(root, { recursive: true, force: true });
 });
 
 test("build refuses worktree symlink escaping its configured root", async () => {
