@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
 import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
+import { LocalPreviewServer } from "../src/preview-server.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -105,6 +106,14 @@ test("Docker sandbox command has enforced network, filesystem and user isolation
 test("API refuses configuration with weak or shared credentials", async () => {
   const server = createServer(new SitePilotStore(), { apiToken: "short", reviewerToken: "short", reviewerId: "reviewer-1" });
   assert.equal((await request(server, "POST", "/projects", "short", { goal: "x" })).status, 503);
+});
+
+test("local preview is localhost-only and read-only", () => {
+  const plan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", source: { repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx" } }] }] };
+  const preview = new LocalPreviewServer({ plan });
+  assert.equal(preview.host, "127.0.0.1");
+  assert.equal(preview.plan.routes[0].components[0].source.commit.length, 40);
+  assert.throws(() => new LocalPreviewServer({ plan, host: "0.0.0.0" }), /localhost/);
 });
 
 test("build refuses worktree symlink escaping its configured root", async () => {
