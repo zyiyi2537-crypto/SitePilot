@@ -3,10 +3,11 @@ import path from "node:path";
 import { PolicyError } from "./core.js";
 
 export function validateDeploymentConfig(env = process.env) {
-  for (const name of ["SITEPILOT_API_TOKEN", "SITEPILOT_REVIEW_TOKEN", "SITEPILOT_REVIEWER_ID"]) {
+  for (const name of ["SITEPILOT_API_TOKEN", "SITEPILOT_REVIEW_TOKEN", "SITEPILOT_L2_TOKEN", "SITEPILOT_REVIEWER_ID"]) {
     if (!env[name]) throw new PolicyError(`${name} is required`, "CONFIG_REQUIRED");
   }
-  if (env.SITEPILOT_API_TOKEN.length < 32 || env.SITEPILOT_REVIEW_TOKEN.length < 32 || env.SITEPILOT_API_TOKEN === env.SITEPILOT_REVIEW_TOKEN) throw new PolicyError("API and reviewer tokens must be distinct and at least 32 characters", "POLICY_DENIED");
+  const tokens = [env.SITEPILOT_API_TOKEN, env.SITEPILOT_REVIEW_TOKEN, env.SITEPILOT_L2_TOKEN];
+  if (tokens.some((token) => token.length < 32) || new Set(tokens).size !== tokens.length) throw new PolicyError("API, reviewer and L2 tokens must be distinct and at least 32 characters", "POLICY_DENIED");
   for (const name of ["SITEPILOT_STATE_FILE", "SITEPILOT_REGISTRY_FILE", "SITEPILOT_EVIDENCE_FILE", "SITEPILOT_WORKTREE_ROOT", "SITEPILOT_QUARANTINE_ROOT"]) {
     if (!env[name] || !path.isAbsolute(env[name])) throw new PolicyError(`${name} must be an absolute path`, "CONFIG_REQUIRED");
   }

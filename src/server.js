@@ -17,6 +17,7 @@ import path from "node:path";
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
+  const l2Token = auth.l2Token ?? process.env.SITEPILOT_L2_TOKEN ?? "";
   const reviewerId = auth.reviewerId ?? process.env.SITEPILOT_REVIEWER_ID ?? "";
   const validToken = (provided, expected) => {
     if (typeof provided !== "string" || !provided.startsWith("Bearer ")) return false;
@@ -44,7 +45,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const authorization = req.headers.authorization || "";
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
-      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch) ? reviewerToken : apiToken;
+      const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
+      if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch) ? reviewerToken : req.method === "POST" && generateMatch ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       const sourceMatch = url.pathname.match(/^\/projects\/([^/]+)\/sources$/);
       if (req.method === "POST" && sourceMatch) {
@@ -128,7 +131,6 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.event(run.id, "page-plan.created", { sourceManifestHash: plan.sourceManifestHash, routeCount: plan.routes.length });
         return send(res, 200, plan);
       }
-      const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       if (req.method === "POST" && generateMatch) {
         if (!generation?.worktreeRoot || !codeAtlas || typeof codeAtlas.getFile !== "function") return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
         const run = store.runs.get(generateMatch[1]);
@@ -145,7 +147,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         });
         const build = await validateGeneratedCandidate({ worktreeRoot: root });
         const candidate = store.createCandidate(run.id, { codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted" }, sourceRefs: run.research?.evidence || [] });
-        store.markQuality(candidate.id, { passed: build.passed, checks: [build.check], sourceManifestHash: build.sourceManifestHash });
+        candidate.build = build;
         run.checkpoint = "candidate_ready";
         store.persist?.();
         return send(res, 201, { candidate, generated, build });

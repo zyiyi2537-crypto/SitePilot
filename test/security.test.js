@@ -140,16 +140,18 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
   const codeAtlas = { getFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
   const root = await fs.mkdtemp("/tmp/sitepilot-api-generation-");
-  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
+  const l2Token = "c".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
   const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
   const run = store.createRun(project.id);
   run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
   const plan = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
   assert.equal(plan.status, 200);
-  const generated = await request(server, "POST", `/runs/${run.id}/generate`, token, {});
+  assert.equal((await request(server, "POST", `/runs/${run.id}/generate`, token, {})).status, 401);
+  const generated = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, {});
   assert.equal(generated.status, 201);
   assert.equal(generated.body.build.passed, true);
-  assert.equal(store.candidates.get(generated.body.candidate.id).quality.passed, true);
+  assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
   assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
   await fs.rm(root, { recursive: true, force: true });
 });
@@ -216,7 +218,7 @@ test("API refuses configuration with weak or shared credentials", async () => {
 
 test("deployment config requires durable paths and paired HTTPS integrations", () => {
   const config = {
-    SITEPILOT_API_TOKEN: "a".repeat(32), SITEPILOT_REVIEW_TOKEN: "b".repeat(32), SITEPILOT_REVIEWER_ID: "reviewer",
+    SITEPILOT_API_TOKEN: "a".repeat(32), SITEPILOT_REVIEW_TOKEN: "b".repeat(32), SITEPILOT_L2_TOKEN: "c".repeat(32), SITEPILOT_REVIEWER_ID: "reviewer",
     SITEPILOT_STATE_FILE: "/var/lib/sitepilot/state.json", SITEPILOT_REGISTRY_FILE: "/var/lib/sitepilot/registry.json",
     SITEPILOT_EVIDENCE_FILE: "/var/lib/sitepilot/evidence.json", SITEPILOT_WORKTREE_ROOT: "/var/lib/sitepilot-worktrees",
     SITEPILOT_QUARANTINE_ROOT: "/var/lib/sitepilot-quarantine", CODEATLAS_MCP_URL: "https://atcode.asia/mcp",

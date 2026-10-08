@@ -33,6 +33,8 @@ npm run local:demo
 
 The production-shaped flow is assembled from the same modules: configure the read-only CodeAtlas adapter, run `researchComponents`, approve registry blocks with license and test evidence, call `runLocalCodePipeline` with an L2 grant, and only then expose the generated worktree to preview/build adapters. The pipeline now invokes the generated-candidate build gate before returning `status: "generated"`.
 
+The API exposes `POST /runs/:id/page-plan` after component approval and `POST /runs/:id/generate` for a server-owned local candidate directory. Generation requires a separate `SITEPILOT_L2_TOKEN`; the ordinary API token cannot trigger code writes. The generated-candidate check only validates the manifest and files. It does not replace real build, browser QA, or reviewer approval, and does not mark the candidate's quality gate as passed.
+
 The default worktree root is `/tmp/sitepilot-worktrees`. A deployment must set `SITEPILOT_WORKTREE_ROOT` to an administrator-owned absolute directory. The model cannot supply or override this path.
 
 The API fails closed until distinct `SITEPILOT_API_TOKEN`, `SITEPILOT_REVIEW_TOKEN`, and `SITEPILOT_REVIEWER_ID` values are configured. The reviewer token is accepted only for the review route. Do not expose the API over plain HTTP outside localhost; terminate TLS at the reverse proxy.
