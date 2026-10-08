@@ -12,9 +12,9 @@ import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "../src/payload
 import { QualityAdapter } from "../src/quality-adapter.js";
 import { JsonSitePilotStore } from "../src/persistence.js";
 import { DeliveryOrchestrator } from "../src/orchestrator.js";
-import { BlockRegistry } from "../src/registry.js";
+import { BlockRegistry, JsonBlockRegistry } from "../src/registry.js";
 import { JsonToolJournal, ToolRuntime } from "../src/tool-runtime.js";
-import { EvidenceStore } from "../src/evidence.js";
+import { EvidenceStore, JsonEvidenceStore } from "../src/evidence.js";
 import { buildIndustrialSlice } from "../src/vertical-slice.js";
 import fsSync from "node:fs";
 import { TemplateSnapshotVerifier } from "../src/template-verifier.js";
@@ -418,6 +418,22 @@ test("block registry requires review evidence before approval", () => {
   registry.transition(block.id, "approved", { reviewerId: "r", licenseVerified: true, testsPassed: true });
   assert.equal(registry.select({ kind: "hero" }).length, 1);
   assert.match(registry.manifest().hash, /^[0-9a-f]{64}$/);
+});
+
+test("component registry and evidence store survive process restart", () => {
+  const root = fsSync.mkdtempSync("/tmp/sitepilot-durable-stores-");
+  const registryPath = path.join(root, "registry.json");
+  const evidencePath = path.join(root, "evidence.json");
+  const registry = new JsonBlockRegistry(registryPath);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit: "f".repeat(40), path: "src/Hero.tsx", license: "MIT" });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const evidence = new JsonEvidenceStore(evidencePath);
+  const source = evidence.registerSource({ projectId: "project_1", kind: "client", name: "brief", content: "Official brand facts" });
+  const record = evidence.addRecord({ sourceId: source.id, locator: "line:1", quote: "Official brand facts" });
+  evidence.createClaim({ projectId: "project_1", statement: "Brand fact", evidenceIds: [record.id] });
+  assert.equal(new JsonBlockRegistry(registryPath).select({ locales: ["zh-CN"] }).length, 1);
+  assert.equal(new JsonEvidenceStore(evidencePath).snapshot("project_1").claims.length, 1);
+  fsSync.rmSync(root, { recursive: true, force: true });
 });
 
 test("tool runtime is idempotent and records failed execution", async () => {

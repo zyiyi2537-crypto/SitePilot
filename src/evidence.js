@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 
 import { PolicyError } from "./core.js";
 
@@ -62,4 +64,30 @@ export class EvidenceStore {
       claims: [...this.claims.values()].filter((claim) => claim.projectId === projectId),
     });
   }
+}
+
+export class JsonEvidenceStore extends EvidenceStore {
+  constructor(file) {
+    super();
+    if (!file || !path.isAbsolute(file)) throw new PolicyError("Evidence store file must be an absolute configured path", "POLICY_DENIED");
+    this.file = path.resolve(file);
+    if (fs.existsSync(this.file)) {
+      const state = JSON.parse(fs.readFileSync(this.file, "utf8"));
+      for (const value of state.sources || []) this.sources.set(value.id, Object.freeze(value));
+      for (const value of state.records || []) this.records.set(value.id, Object.freeze(value));
+      for (const value of state.claims || []) this.claims.set(value.id, Object.freeze(value));
+    }
+  }
+
+  persist() {
+    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    const temporary = `${this.file}.tmp-${process.pid}`;
+    fs.writeFileSync(temporary, JSON.stringify({ sources: [...this.sources.values()], records: [...this.records.values()], claims: [...this.claims.values()] }, null, 2), { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, this.file);
+  }
+
+  registerSource(...args) { const value = super.registerSource(...args); this.persist(); return value; }
+  addRecord(...args) { const value = super.addRecord(...args); this.persist(); return value; }
+  createClaim(...args) { const value = super.createClaim(...args); this.persist(); return value; }
+  invalidateExpiredClaims(...args) { const value = super.invalidateExpiredClaims(...args); this.persist(); return value; }
 }

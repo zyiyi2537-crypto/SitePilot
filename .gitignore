@@ -1,0 +1,6 @@
+ops/sitepilot.env
+.env
+.env.*
+!.env.example
+node_modules/
+coverage/

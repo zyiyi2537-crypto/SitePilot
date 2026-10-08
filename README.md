@@ -42,3 +42,7 @@ The API fails closed until distinct `SITEPILOT_API_TOKEN`, `SITEPILOT_REVIEW_TOK
 Only project worktrees are writable. `CodeAtlas`, production repositories, remote Git, credentials, and production publishing are outside the registered tool set. A real adapter must preserve the CandidateRevision -> test preview -> quality -> review -> DraftVersion sequence in `docs/PRD.md`.
 
 Builds and dependency installs require a Docker sandbox runner with an image pinned by digest. The pinned Payload Website Template uses `workspace:*`, so its build snapshot also contains the Payload package workspace and root lockfile. Without Docker, a configured image, and a Node 24.15+ compatible build image, those operations remain unavailable; the API does not invoke them on the host.
+
+## Deployment Readiness
+
+The API can persist projects/runs, component approvals, and evidence into separate JSON files. The Compose setup mounts those stores in persistent named volumes and publishes the API only on `127.0.0.1`. Run `npm run deploy:check` before deployment. TLS termination and public access controls remain an operator responsibility. Storage is single-instance only; migrate to SQLite/PostgreSQL before adding replicas or concurrent writers. See [ops/README.md](ops/README.md) for setup and backup instructions.

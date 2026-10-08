@@ -10,6 +10,7 @@ import { LocalPreviewServer } from "../src/preview-server.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 import { BlockRegistry } from "../src/registry.js";
+import { validateDeploymentConfig } from "../src/deployment-config.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -188,6 +189,20 @@ test("Docker sandbox command has enforced network, filesystem and user isolation
 test("API refuses configuration with weak or shared credentials", async () => {
   const server = createServer(new SitePilotStore(), { apiToken: "short", reviewerToken: "short", reviewerId: "reviewer-1" });
   assert.equal((await request(server, "POST", "/projects", "short", { goal: "x" })).status, 503);
+});
+
+test("deployment config requires durable paths and paired HTTPS integrations", () => {
+  const config = {
+    SITEPILOT_API_TOKEN: "a".repeat(32), SITEPILOT_REVIEW_TOKEN: "b".repeat(32), SITEPILOT_REVIEWER_ID: "reviewer",
+    SITEPILOT_STATE_FILE: "/var/lib/sitepilot/state.json", SITEPILOT_REGISTRY_FILE: "/var/lib/sitepilot/registry.json",
+    SITEPILOT_EVIDENCE_FILE: "/var/lib/sitepilot/evidence.json", SITEPILOT_WORKTREE_ROOT: "/var/lib/sitepilot-worktrees",
+    SITEPILOT_QUARANTINE_ROOT: "/var/lib/sitepilot-quarantine", CODEATLAS_MCP_URL: "https://atcode.asia/mcp",
+    CODEATLAS_MCP_TOKEN: "secret", CODEATLAS_REPOSITORIES: "payload",
+  };
+  assert.equal(validateDeploymentConfig(config).codeAtlasConfigured, true);
+  assert.throws(() => validateDeploymentConfig({ ...config, SITEPILOT_REVIEW_TOKEN: config.SITEPILOT_API_TOKEN }), /distinct/);
+  assert.throws(() => validateDeploymentConfig({ ...config, CODEATLAS_MCP_URL: "http://atcode.asia/mcp" }), /HTTPS/);
+  assert.throws(() => validateDeploymentConfig({ ...config, SITEPILOT_REGISTRY_FILE: undefined }), /SITEPILOT_REGISTRY_FILE/);
 });
 
 test("local preview is localhost-only and read-only", () => {

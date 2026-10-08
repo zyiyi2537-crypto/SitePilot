@@ -28,7 +28,7 @@ export class JsonSitePilotStore extends SitePilotStore {
     const payload = JSON.stringify({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit }, null, 2);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.tmp-${process.pid}`;
-    fs.writeFileSync(temp, payload, "utf8");
+    fs.writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
     fs.renameSync(temp, this.file);
   }
 

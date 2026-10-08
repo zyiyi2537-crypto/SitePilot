@@ -2,11 +2,13 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { SitePilotStore, planStrategy } from "./core.js";
 import { JsonSitePilotStore } from "./persistence.js";
-import { EvidenceStore } from "./evidence.js";
+import { EvidenceStore, JsonEvidenceStore } from "./evidence.js";
 import { planPayloadSchema } from "./payload-schema.js";
-import { BlockRegistry } from "./registry.js";
+import { BlockRegistry, JsonBlockRegistry } from "./registry.js";
 import { researchComponents } from "./research-agent.js";
 import { composePagePlan } from "./page-composer.js";
+import { createCodeAtlasAdapterFromEnvironment } from "./codeatlas.js";
+import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "./payload-adapter.js";
 
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
@@ -96,6 +98,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           locales: revised.inputSnapshot.locale,
         });
         revised.checkpoint = "strategy_ready";
+        store.persist?.();
         return send(res, 201, revised);
       }
       const researchMatch = url.pathname.match(/^\/runs\/([^/]+)\/research$/);
@@ -127,6 +130,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const candidate = store.createCandidate(run.id, await readJson(req));
         run.checkpoint = "candidate_ready";
+        store.persist?.();
         return send(res, 201, candidate);
       }
       const payloadMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-draft$/);
@@ -158,6 +162,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const draft = store.packageReview(candidate.id, { approvedByReviewer: reviewerId, notes: decision.notes || "" });
         const run = store.runs.get(candidate.runId);
         if (run) run.checkpoint = "draft_ready_for_review";
+        store.persist?.();
         return send(res, 201, draft);
       }
       const statusMatch = url.pathname.match(/^\/runs\/([^/]+)$/);
@@ -176,5 +181,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT || 3100);
   const store = process.env.SITEPILOT_STATE_FILE ? new JsonSitePilotStore(process.env.SITEPILOT_STATE_FILE) : new SitePilotStore();
-  createServer(store).listen(port, "127.0.0.1", () => console.log(`SitePilot API listening on http://127.0.0.1:${port}`));
+  const evidence = process.env.SITEPILOT_EVIDENCE_FILE ? new JsonEvidenceStore(process.env.SITEPILOT_EVIDENCE_FILE) : new EvidenceStore();
+  const registry = process.env.SITEPILOT_REGISTRY_FILE ? new JsonBlockRegistry(process.env.SITEPILOT_REGISTRY_FILE) : new BlockRegistry();
+  const codeAtlasSettings = [process.env.CODEATLAS_MCP_URL, process.env.CODEATLAS_MCP_TOKEN, process.env.CODEATLAS_REPOSITORIES];
+  if (codeAtlasSettings.some(Boolean) && codeAtlasSettings.some((value) => !value)) throw new Error("Configure CODEATLAS_MCP_URL, CODEATLAS_MCP_TOKEN, and CODEATLAS_REPOSITORIES together");
+  const codeAtlas = codeAtlasSettings.every(Boolean) ? createCodeAtlasAdapterFromEnvironment() : null;
+  const payloadSettings = [process.env.PAYLOAD_SANDBOX_URL, process.env.PAYLOAD_SANDBOX_TOKEN];
+  if (payloadSettings.some(Boolean) && payloadSettings.some((value) => !value)) throw new Error("Configure PAYLOAD_SANDBOX_URL and PAYLOAD_SANDBOX_TOKEN together");
+  const payload = payloadSettings.every(Boolean) ? new PayloadSandboxAdapter({ backend: new PayloadHttpSandboxBackend({ baseUrl: process.env.PAYLOAD_SANDBOX_URL, token: process.env.PAYLOAD_SANDBOX_TOKEN }) }) : null;
+  const host = process.env.SITEPILOT_HOST || "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "0.0.0.0") throw new Error("SITEPILOT_HOST must be 127.0.0.1 or 0.0.0.0");
+  createServer(store, {}, evidence, registry, codeAtlas, payload).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
 }
