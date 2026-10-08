@@ -21,6 +21,7 @@ import { TemplateSnapshotVerifier } from "../src/template-verifier.js";
 import { createPinnedSourceFetcher, PINNED_SOURCES } from "../src/pinned-sources.js";
 import { planPayloadSchema } from "../src/payload-schema.js";
 import { planComponents } from "../src/component-planner.js";
+import { composePagePlan } from "../src/page-composer.js";
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -270,6 +271,21 @@ test("component planner turns fixed CodeAtlas evidence into reviewable candidate
   assert.deepEqual(result.components.map((item) => item.status), ["candidate", "candidate", "missing_evidence"]);
   assert.equal(result.requiresReview, true);
   assert.equal(result.manifest.blocks.length, 2);
+});
+
+test("page composer only uses approved registry components", () => {
+  const registry = new BlockRegistry();
+  const commit = "a".repeat(40);
+  const hero = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["zh-CN", "en"] });
+  registry.transition(hero.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const plan = composePagePlan({
+    projectId: "project_1", runId: "run_1", registry,
+    strategy: { pageHierarchy: ["home", "contact"], blocks: ["Hero"], locales: ["zh-CN", "en"] },
+  });
+  assert.equal(plan.writesAllowed, false);
+  assert.deepEqual(plan.files, ["src/app/(site)/home/page.tsx", "src/app/(site)/contact/page.tsx"]);
+  assert.equal(plan.routes[0].components[0].source.commit, commit);
+  assert.throws(() => composePagePlan({ registry, strategy: { pageHierarchy: ["home"], blocks: ["ContactForm"] } }), /not approved/);
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {
