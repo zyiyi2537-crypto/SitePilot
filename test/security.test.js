@@ -9,6 +9,7 @@ import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
+import { BlockRegistry } from "../src/registry.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -82,6 +83,22 @@ test("run research uses server-side CodeAtlas adapter and freezes requested comm
   assert.equal(response.status, 200);
   assert.equal(response.body.componentPlan.requiresReview, true);
   assert.equal(store.runs.get(run.id).checkpoint, "components_pending_review");
+});
+
+test("page plan endpoint only returns plans after registry approval", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const registry = new BlockRegistry();
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, registry);
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  assert.equal((await request(server, "POST", `/runs/${run.id}/page-plan`, token, {})).status, 400);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const planned = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
+  assert.equal(planned.status, 200);
+  assert.equal(planned.body.writesAllowed, false);
 });
 
 test("evidence API records sources, citations and claims under the project", async () => {

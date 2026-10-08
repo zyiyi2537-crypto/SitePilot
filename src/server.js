@@ -6,6 +6,7 @@ import { EvidenceStore } from "./evidence.js";
 import { planPayloadSchema } from "./payload-schema.js";
 import { BlockRegistry } from "./registry.js";
 import { researchComponents } from "./research-agent.js";
+import { composePagePlan } from "./page-composer.js";
 
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
@@ -109,6 +110,16 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         run.checkpoint = result.componentPlan.requiresReview ? "components_pending_review" : "components_approved";
         store.event(run.id, "research.completed", { repository: result.repository, commit: result.commit, evidenceCount: result.evidence.length, requiresReview: result.componentPlan.requiresReview });
         return send(res, 200, result);
+      }
+      const planMatch = url.pathname.match(/^\/runs\/([^/]+)\/page-plan$/);
+      if (req.method === "POST" && planMatch) {
+        const run = store.runs.get(planMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const plan = composePagePlan({ strategy: run.strategy, registry, projectId: run.projectId, runId: run.id });
+        run.pagePlan = plan;
+        run.checkpoint = "page_plan_ready";
+        store.event(run.id, "page-plan.created", { sourceManifestHash: plan.sourceManifestHash, routeCount: plan.routes.length });
+        return send(res, 200, plan);
       }
       const candidateRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/candidates$/);
       if (req.method === "POST" && candidateRunMatch) {
