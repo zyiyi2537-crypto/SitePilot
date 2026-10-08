@@ -117,6 +117,19 @@ test("Payload API only creates sandbox drafts after quality gates", async () => 
   assert.equal(calls[0].environment, "sandbox");
 });
 
+test("QA API records signed quality result on candidate", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const quality = { run: async (input) => ({ candidateId: input.candidateId, candidateHash: input.candidateHash, passed: true, reportHash: "report_1", results: [] }) };
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, null, quality);
+  const project = store.createProject({ goal: "website" });
+  const run = store.createRun(project.id);
+  const candidate = store.createCandidate(run.id, {});
+  const result = await request(server, "POST", `/candidates/${candidate.id}/qa`, token, { qaPreviewId: "preview_1" });
+  assert.equal(result.status, 200);
+  assert.equal(store.candidates.get(candidate.id).quality.passed, true);
+});
+
 test("evidence API records sources, citations and claims under the project", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "evidence" });
