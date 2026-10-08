@@ -336,16 +336,17 @@ test("local pipeline stops for review and generates after approved evidence", as
   const commit = "c".repeat(40);
   const strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN"] };
   const registry = new BlockRegistry();
-  const writes = {};
+  const root = fsSync.mkdtempSync("/tmp/sitepilot-local-pipeline-");
+  const worktree = new WorktreePolicy(root);
   const adapter = { search: async () => [{ repository: "payload", commit, path: "src/Hero.tsx", licenseReference: "MIT", evidenceId: "hero-1" }] };
-  const worktree = { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } };
   const pending = await runLocalCodePipeline({ strategy, adapter, registry, worktree, repository: "payload", expectedCommit: commit, grant: { level: "L2" } });
   assert.equal(pending.status, "needs_review");
   const block = registry.blocks.values().next().value;
   registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
   const generated = await runLocalCodePipeline({ strategy, adapter, registry, worktree, repository: "payload", expectedCommit: commit, grant: { level: "L2" } });
   assert.equal(generated.status, "generated");
-  assert.ok(writes["src/app/(site)/home/page.tsx"]);
+  assert.ok(fsSync.existsSync(path.join(root, "src/app/(site)/home/page.tsx")));
+  fsSync.rmSync(root, { recursive: true, force: true });
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {
