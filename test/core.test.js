@@ -24,6 +24,7 @@ import { planComponents } from "../src/component-planner.js";
 import { composePagePlan } from "../src/page-composer.js";
 import { researchComponents } from "../src/research-agent.js";
 import { materializePagePlan } from "../src/code-generator.js";
+import { runLocalCodePipeline } from "../src/local-pipeline.js";
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -329,6 +330,22 @@ test("code generator materializes only a valid page plan with L2 grant", async (
   assert.match(writes["src/app/(site)/home/page.tsx"], /data-component="Hero"/);
   assert.ok(writes["src/generated/sitepilot-manifest.json"]);
   await assert.rejects(() => materializePagePlan({ plan, worktree: { applyPatch: async () => ({ files: [] }) } }), /L2 grant/);
+});
+
+test("local pipeline stops for review and generates after approved evidence", async () => {
+  const commit = "c".repeat(40);
+  const strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN"] };
+  const registry = new BlockRegistry();
+  const writes = {};
+  const adapter = { search: async () => [{ repository: "payload", commit, path: "src/Hero.tsx", licenseReference: "MIT", evidenceId: "hero-1" }] };
+  const worktree = { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } };
+  const pending = await runLocalCodePipeline({ strategy, adapter, registry, worktree, repository: "payload", expectedCommit: commit, grant: { level: "L2" } });
+  assert.equal(pending.status, "needs_review");
+  const block = registry.blocks.values().next().value;
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const generated = await runLocalCodePipeline({ strategy, adapter, registry, worktree, repository: "payload", expectedCommit: commit, grant: { level: "L2" } });
+  assert.equal(generated.status, "generated");
+  assert.ok(writes["src/app/(site)/home/page.tsx"]);
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {

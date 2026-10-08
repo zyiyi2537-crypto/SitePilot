@@ -28,6 +28,13 @@ export function planComponents({ strategy, evidence = [], registry = new BlockRe
     const match = [...byPath.values()].find((item) => item.componentName === name || item.kind === kind);
     if (!match) return { name, kind, status: "missing_evidence", evidenceRequired: true };
     if (!match.licenseReference) return { name, kind, status: "license_missing", evidenceId: match.evidenceId };
+    const approved = registry.select({ locales: strategy.locales || [] }).find((item) => (
+      item.name === name
+      && item.repository === match.repository
+      && item.commit === match.commit.toLowerCase()
+      && item.path === match.path
+    ));
+    if (approved) return { name, kind, status: "approved", blockId: approved.id, evidenceId: match.evidenceId };
     const block = registry.register({
       name, kind, repository: match.repository, commit: match.commit, path: match.path,
       license: match.licenseReference, sourceRefs: [match.evidenceId],
@@ -41,7 +48,7 @@ export function planComponents({ strategy, evidence = [], registry = new BlockRe
     registryVersion: registry.version,
     projectId: projectId || null,
     components: Object.freeze(components),
-    requiresReview: components.some((component) => component.status !== "candidate"),
+    requiresReview: components.some((component) => component.status !== "approved"),
     manifest: registry.manifest(),
   });
 }
