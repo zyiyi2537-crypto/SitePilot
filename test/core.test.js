@@ -23,6 +23,7 @@ import { planPayloadSchema } from "../src/payload-schema.js";
 import { planComponents } from "../src/component-planner.js";
 import { composePagePlan } from "../src/page-composer.js";
 import { researchComponents } from "../src/research-agent.js";
+import { materializePagePlan } from "../src/code-generator.js";
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -306,6 +307,28 @@ test("research agent searches every strategy block at a frozen commit", async ()
   assert.deepEqual(calls.map((call) => call.expectedCommit), [commit, commit]);
   assert.deepEqual(result.componentPlan.components.map((item) => item.status), ["candidate", "candidate"]);
   assert.equal(result.evidence.length, 2);
+});
+
+test("code generator materializes only a valid page plan with L2 grant", async () => {
+  const plan = composePagePlan({
+    projectId: "project_1", runId: "run_1",
+    registry: (() => {
+      const value = new BlockRegistry();
+      const block = value.register({ name: "Hero", kind: "hero", repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx", license: "MIT", supportedLocales: ["zh-CN"] });
+      value.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+      return value;
+    })(),
+    strategy: { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN"] },
+  });
+  const writes = {};
+  const result = await materializePagePlan({
+    plan, grant: { level: "L2" },
+    worktree: { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } },
+  });
+  assert.equal(result.generated, true);
+  assert.match(writes["src/app/(site)/home/page.tsx"], /data-component="Hero"/);
+  assert.ok(writes["src/generated/sitepilot-manifest.json"]);
+  await assert.rejects(() => materializePagePlan({ plan, worktree: { applyPatch: async () => ({ files: [] }) } }), /L2 grant/);
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {
