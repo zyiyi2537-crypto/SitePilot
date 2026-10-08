@@ -9,8 +9,12 @@ import { researchComponents } from "./research-agent.js";
 import { composePagePlan } from "./page-composer.js";
 import { createCodeAtlasAdapterFromEnvironment } from "./codeatlas.js";
 import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "./payload-adapter.js";
+import { WorktreePolicy } from "./core.js";
+import { materializePagePlan } from "./code-generator.js";
+import { validateGeneratedCandidate } from "./local-build.js";
+import path from "node:path";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null) {
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
   const reviewerId = auth.reviewerId ?? process.env.SITEPILOT_REVIEWER_ID ?? "";
@@ -124,6 +128,28 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.event(run.id, "page-plan.created", { sourceManifestHash: plan.sourceManifestHash, routeCount: plan.routes.length });
         return send(res, 200, plan);
       }
+      const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
+      if (req.method === "POST" && generateMatch) {
+        if (!generation?.worktreeRoot || !codeAtlas || typeof codeAtlas.getFile !== "function") return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+        const run = store.runs.get(generateMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+        if (run.candidateIds.length) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
+        const root = path.resolve(generation.worktreeRoot, run.id);
+        const worktree = new WorktreePolicy(root);
+        const generated = await materializePagePlan({
+          plan: run.pagePlan,
+          worktree,
+          grant: { level: "L2" },
+          sourceResolver: (source) => codeAtlas.getFile({ ...source, expectedCommit: source.commit }),
+        });
+        const build = await validateGeneratedCandidate({ worktreeRoot: root });
+        const candidate = store.createCandidate(run.id, { codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted" }, sourceRefs: run.research?.evidence || [] });
+        store.markQuality(candidate.id, { passed: build.passed, checks: [build.check], sourceManifestHash: build.sourceManifestHash });
+        run.checkpoint = "candidate_ready";
+        store.persist?.();
+        return send(res, 201, { candidate, generated, build });
+      }
       const candidateRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/candidates$/);
       if (req.method === "POST" && candidateRunMatch) {
         const run = store.runs.get(candidateRunMatch[1]);
@@ -191,5 +217,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const payload = payloadSettings.every(Boolean) ? new PayloadSandboxAdapter({ backend: new PayloadHttpSandboxBackend({ baseUrl: process.env.PAYLOAD_SANDBOX_URL, token: process.env.PAYLOAD_SANDBOX_TOKEN }) }) : null;
   const host = process.env.SITEPILOT_HOST || "127.0.0.1";
   if (host !== "127.0.0.1" && host !== "0.0.0.0") throw new Error("SITEPILOT_HOST must be 127.0.0.1 or 0.0.0.0");
-  createServer(store, {}, evidence, registry, codeAtlas, payload).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
+  createServer(store, {}, evidence, registry, codeAtlas, payload, null, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
 }

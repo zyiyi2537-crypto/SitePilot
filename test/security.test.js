@@ -131,6 +131,29 @@ test("QA API records signed quality result on candidate", async () => {
   assert.equal(store.candidates.get(candidate.id).quality.passed, true);
 });
 
+test("generation API uses server-owned worktree and frozen CodeAtlas files", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const registry = new BlockRegistry();
+  const commit = "d".repeat(40);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const codeAtlas = { getFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
+  const root = await fs.mkdtemp("/tmp/sitepilot-api-generation-");
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  const plan = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
+  assert.equal(plan.status, 200);
+  const generated = await request(server, "POST", `/runs/${run.id}/generate`, token, {});
+  assert.equal(generated.status, 201);
+  assert.equal(generated.body.build.passed, true);
+  assert.equal(store.candidates.get(generated.body.candidate.id).quality.passed, true);
+  assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("evidence API records sources, citations and claims under the project", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "evidence" });
