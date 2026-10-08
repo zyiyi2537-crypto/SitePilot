@@ -20,6 +20,7 @@ import fsSync from "node:fs";
 import { TemplateSnapshotVerifier } from "../src/template-verifier.js";
 import { createPinnedSourceFetcher, PINNED_SOURCES } from "../src/pinned-sources.js";
 import { planPayloadSchema } from "../src/payload-schema.js";
+import { planComponents } from "../src/component-planner.js";
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -254,6 +255,21 @@ test("Payload schema planner creates only strategy-approved draft models", () =>
   assert.equal(schema.rules.publishAllowed, false);
   assert.ok(schema.collections.find((item) => item.name === "pages").fields.some((item) => item.name === "seo"));
   assert.throws(() => planPayloadSchema({ strategy: { locales: ["xx"] } }), /unsupported locale/);
+});
+
+test("component planner turns fixed CodeAtlas evidence into reviewable candidates", () => {
+  const commit = "a".repeat(40);
+  const result = planComponents({
+    projectId: "project_1",
+    strategy: { blocks: ["Hero", "ProductGrid", "ContactForm"], locales: ["zh-CN", "en"] },
+    evidence: [
+      { componentName: "Hero", repository: "payload", commit, path: "src/Hero.tsx", licenseReference: "MIT", evidenceId: "e1", tests: ["hero.test"] },
+      { componentName: "ProductGrid", repository: "payload", commit, path: "src/ProductGrid.tsx", licenseReference: "MIT", evidenceId: "e2" },
+    ],
+  });
+  assert.deepEqual(result.components.map((item) => item.status), ["candidate", "candidate", "missing_evidence"]);
+  assert.equal(result.requiresReview, true);
+  assert.equal(result.manifest.blocks.length, 2);
 });
 
 test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async () => {
