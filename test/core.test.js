@@ -81,6 +81,13 @@ test("SQLite stores recover project, evidence and registry state and reject stal
   await fs.rm(root, { recursive: true });
 });
 
+test("registry registration cannot bypass reviewer approval", () => {
+  const registry = new BlockRegistry();
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "r", commit: "a".repeat(40), path: "Hero.tsx", license: "MIT", state: "approved" });
+  assert.equal(block.state, "candidate");
+  assert.equal(registry.select({ kind: "hero" }).length, 0);
+});
+
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
   const saas = planStrategy({ industry: "saas", locale: ["en"] });

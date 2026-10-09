@@ -26,7 +26,7 @@ export class BlockRegistry {
       commit: input.commit.toLowerCase(), path: input.path, license: input.license,
       propsSchema: input.propsSchema || {}, supportedLocales: input.supportedLocales || ["zh-CN", "en"],
       targetStacks: input.targetStacks || ["nextjs-payload"], tests: input.tests || [],
-      compatibility: input.compatibility || {}, state: input.state || "candidate",
+      compatibility: input.compatibility || {}, state: "candidate",
       sourceRefs: input.sourceRefs || [], createdAt: input.createdAt || new Date().toISOString(),
     });
     if (!STATES.has(block.state)) throw new PolicyError(`Unknown block state: ${block.state}`, "INVALID_INPUT");
