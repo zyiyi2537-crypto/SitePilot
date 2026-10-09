@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { PolicyError } from "./core.js";
+import { SqliteState } from "./sqlite-state.js";
 
 const id = (prefix) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex");
@@ -90,4 +91,18 @@ export class JsonEvidenceStore extends EvidenceStore {
   addRecord(...args) { const value = super.addRecord(...args); this.persist(); return value; }
   createClaim(...args) { const value = super.createClaim(...args); this.persist(); return value; }
   invalidateExpiredClaims(...args) { const value = super.invalidateExpiredClaims(...args); this.persist(); return value; }
+}
+
+export class SqliteEvidenceStore extends EvidenceStore {
+  constructor(file) {
+    super();
+    this.state = new SqliteState(file, "evidence", { sources: [], records: [], claims: [] });
+    for (const name of ["sources", "records", "claims"]) for (const value of this.state.data[name] || []) this[name].set(value.id, Object.freeze(value));
+  }
+  persist() { this.state.save({ sources: [...this.sources.values()], records: [...this.records.values()], claims: [...this.claims.values()] }); }
+  registerSource(...args) { const value = super.registerSource(...args); this.persist(); return value; }
+  addRecord(...args) { const value = super.addRecord(...args); this.persist(); return value; }
+  createClaim(...args) { const value = super.createClaim(...args); this.persist(); return value; }
+  invalidateExpiredClaims(...args) { const value = super.invalidateExpiredClaims(...args); this.persist(); return value; }
+  close() { this.state.close(); }
 }

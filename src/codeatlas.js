@@ -170,6 +170,30 @@ export class CodeAtlasMcpAdapter {
       licenseReference: this.licenseReferences[repo] || raw.license_reference || null,
     };
   }
+
+  async getCompleteFile({ repository, path, expectedCommit, maxLines = 2000, maxBytes = 256 * 1024 } = {}) {
+    if (!Number.isInteger(maxLines) || maxLines < 1 || maxLines > 2000 || !Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 256 * 1024) throw new PolicyError("Invalid source size limit", "INVALID_INPUT");
+    let startLine = 1;
+    let bytes = 0;
+    const lines = [];
+    while (startLine <= maxLines) {
+      const page = await this.getFile({ repository, path, expectedCommit, startLine, endLine: Math.min(startLine + 199, maxLines) });
+      if (page.path !== path || page.locator.startLine !== startLine) throw new PolicyError("CodeAtlas file page changed path or line", "STALE_REVISION");
+      const numbered = page.content ? page.content.split("\n") : [];
+      if (numbered.length > 200) throw new PolicyError("CodeAtlas file page exceeded 200 lines", "INVALID_EVIDENCE");
+      if (numbered.length && page.locator.endLine !== startLine + numbered.length - 1) throw new PolicyError("CodeAtlas file page locator is inconsistent", "INVALID_EVIDENCE");
+      for (const [index, line] of numbered.entries()) {
+        const match = /^\s*(\d+): (.*)$/.exec(line);
+        if (!match || Number(match[1]) !== startLine + index) throw new PolicyError("CodeAtlas file line numbering is invalid", "INVALID_EVIDENCE");
+        lines.push(match[2]);
+        bytes += Buffer.byteLength(match[2], "utf8") + 1;
+        if (bytes > maxBytes) throw new PolicyError("CodeAtlas file exceeded source size limit", "INVALID_EVIDENCE");
+      }
+      if (numbered.length < 200) return { repository, commit: requireCommit(expectedCommit), path, content: lines.join("\n"), licenseReference: page.licenseReference };
+      startLine += numbered.length;
+    }
+    throw new PolicyError("CodeAtlas file exceeded line limit or did not reach EOF", "INVALID_EVIDENCE");
+  }
 }
 
 export class FixtureCodeAtlasTransport {

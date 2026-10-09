@@ -10,13 +10,14 @@ import { ProjectWorktreeManager } from "../src/worktree.js";
 import { BuildExecutor, DockerSandboxRunner, LockedDependencyInstaller } from "../src/build-executor.js";
 import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "../src/payload-adapter.js";
 import { QualityAdapter } from "../src/quality-adapter.js";
-import { JsonSitePilotStore } from "../src/persistence.js";
+import { JsonSitePilotStore, SqliteSitePilotStore } from "../src/persistence.js";
 import { DeliveryOrchestrator } from "../src/orchestrator.js";
-import { BlockRegistry, JsonBlockRegistry } from "../src/registry.js";
+import { BlockRegistry, JsonBlockRegistry, SqliteBlockRegistry } from "../src/registry.js";
 import { JsonToolJournal, ToolRuntime } from "../src/tool-runtime.js";
-import { EvidenceStore, JsonEvidenceStore } from "../src/evidence.js";
+import { EvidenceStore, JsonEvidenceStore, SqliteEvidenceStore } from "../src/evidence.js";
 import { buildIndustrialSlice } from "../src/vertical-slice.js";
 import fsSync from "node:fs";
+import fs from "node:fs/promises";
 import { TemplateSnapshotVerifier } from "../src/template-verifier.js";
 import { createPinnedSourceFetcher, PINNED_SOURCES } from "../src/pinned-sources.js";
 import { planPayloadSchema } from "../src/payload-schema.js";
@@ -25,6 +26,60 @@ import { composePagePlan } from "../src/page-composer.js";
 import { researchComponents } from "../src/research-agent.js";
 import { materializePagePlan } from "../src/code-generator.js";
 import { runLocalCodePipeline } from "../src/local-pipeline.js";
+import { GrantStore, SqliteGrantStore } from "../src/grants.js";
+
+test("project L2 grants are scoped, revocable and single use", () => {
+  const grants = new GrantStore();
+  const input = { projectId: "project_1", runId: "run_1", tool: "generate_candidate", resource: "/tmp/project_1/run_1", planHash: "plan_1", expiresAt: new Date(Date.now() + 60_000).toISOString(), issuedBy: "reviewer" };
+  const grant = grants.issue(input);
+  assert.throws(() => grants.consume(grant.id, { ...input, projectId: "project_2" }), /scope/);
+  assert.throws(() => grants.consume(grant.id, { ...input, planHash: "plan_2" }), /scope/);
+  assert.equal(grants.consume(grant.id, input).usedAt !== null, true);
+  assert.throws(() => grants.consume(grant.id, input), /already used/);
+  const revoked = grants.issue(input);
+  grants.revoke(revoked.id);
+  assert.throws(() => grants.consume(revoked.id, input), /revoked/);
+  assert.throws(() => grants.issue({ ...input, expiresAt: new Date(Date.now() - 1).toISOString() }), /15 minutes/);
+});
+
+test("SQLite grants remain used and revoked after restart", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-grants-");
+  const file = `${root}/grants.sqlite`;
+  const input = { projectId: "p", runId: "r", tool: "generate_candidate", resource: "/tmp/p/r", planHash: "h", expiresAt: new Date(Date.now() + 60_000).toISOString(), issuedBy: "owner" };
+  const first = new SqliteGrantStore(file);
+  const used = first.issue(input);
+  first.consume(used.id, input);
+  const revoked = first.issue(input);
+  first.revoke(revoked.id);
+  first.close();
+  const second = new SqliteGrantStore(file);
+  assert.throws(() => second.consume(used.id, input), /already used/);
+  assert.throws(() => second.consume(revoked.id, input), /revoked/);
+  second.close();
+  await fs.rm(root, { recursive: true });
+});
+
+test("SQLite stores recover project, evidence and registry state and reject stale writers", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-state-");
+  const file = `${root}/state.sqlite`;
+  const core = new SqliteSitePilotStore(file);
+  const stale = new SqliteSitePilotStore(file);
+  const evidence = new SqliteEvidenceStore(file);
+  const registry = new SqliteBlockRegistry(file);
+  const project = core.createProject({ goal: "test" });
+  const source = evidence.registerSource({ projectId: project.id, kind: "client", name: "facts", content: "confirmed" });
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "r", commit: "a".repeat(40), path: "Hero.tsx", license: "MIT" });
+  assert.throws(() => stale.createProject({ goal: "stale" }), /another writer/);
+  core.close(); stale.close(); evidence.close(); registry.close();
+  const loadedCore = new SqliteSitePilotStore(file);
+  const loadedEvidence = new SqliteEvidenceStore(file);
+  const loadedRegistry = new SqliteBlockRegistry(file);
+  assert.equal(loadedCore.projects.get(project.id).goal, "test");
+  assert.equal(loadedEvidence.sources.get(source.id).contentHash, source.contentHash);
+  assert.equal(loadedRegistry.blocks.get(block.id).state, "candidate");
+  loadedCore.close(); loadedEvidence.close(); loadedRegistry.close();
+  await fs.rm(root, { recursive: true });
+});
 
 test("strategy changes by industry", () => {
   const industrial = planStrategy({ industry: "industrial", locale: ["zh-CN", "en"] });
@@ -113,6 +168,21 @@ test("CodeAtlas adapter requires full commit SHA", async () => {
     transport: new FixtureCodeAtlasTransport({ search_code: () => [] }),
   });
   await assert.rejects(() => adapter.search({ query: "x", repository: "repo", expectedCommit: "main" }), /full 40-character commit SHA/);
+});
+
+test("CodeAtlas full file retrieval removes numbered pages and rejects gaps", async () => {
+  const commit = "f".repeat(40);
+  const lines = Array.from({ length: 205 }, (_, i) => `line ${i + 1}`);
+  const adapter = new CodeAtlasMcpAdapter({ repositories: ["repo"], transport: new FixtureCodeAtlasTransport({
+    get_file: ({ repository, path, start_line, end_line }) => ({ repo: repository, path, commit, start_line, end_line: Math.min(end_line, lines.length), content: lines.slice(start_line - 1, end_line).map((line, i) => `${String(start_line + i).padStart(6)}: ${line}`).join("\n") }),
+  }) });
+  const file = await adapter.getCompleteFile({ repository: "repo", path: "src/Hero.tsx", expectedCommit: commit });
+  assert.equal(file.content.split("\n").length, 205);
+  assert.equal(file.content.split("\n")[200], "line 201");
+  const broken = new CodeAtlasMcpAdapter({ repositories: ["repo"], transport: new FixtureCodeAtlasTransport({
+    get_file: ({ repository, path }) => ({ repo: repository, path, commit, start_line: 1, end_line: 1, content: "     2: missing first line" }),
+  }) });
+  await assert.rejects(() => broken.getCompleteFile({ repository: "repo", path: "src/Hero.tsx", expectedCommit: commit }), /numbering/);
 });
 
 test("CodeAtlas adapter rejects an empty repository allowlist", async () => {
@@ -286,7 +356,7 @@ test("page composer only uses approved registry components", () => {
     strategy: { pageHierarchy: ["home", "contact"], blocks: ["Hero"], locales: ["zh-CN", "en"] },
   });
   assert.equal(plan.writesAllowed, false);
-  assert.deepEqual(plan.files, ["src/app/(site)/home/page.tsx", "src/app/(site)/contact/page.tsx"]);
+  assert.deepEqual(plan.files, ["src/app/(frontend)/page.tsx", "src/app/(frontend)/contact/page.tsx"]);
   assert.equal(plan.routes[0].components[0].source.commit, commit);
   assert.throws(() => composePagePlan({ registry, strategy: { pageHierarchy: ["home"], blocks: ["ContactForm"] } }), /not approved/);
 });
@@ -327,7 +397,7 @@ test("code generator materializes only a valid page plan with L2 grant", async (
     worktree: { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } },
   });
   assert.equal(result.generated, true);
-  assert.match(writes["src/app/(site)/home/page.tsx"], /data-component="Hero"/);
+  assert.match(writes["src/app/(frontend)/page.tsx"], /data-component="Hero"/);
   assert.ok(writes["src/generated/sitepilot-manifest.json"]);
   await assert.rejects(() => materializePagePlan({ plan, worktree: { applyPatch: async () => ({ files: [] }) } }), /L2 grant/);
 });
@@ -357,7 +427,7 @@ test("local pipeline stops for review and generates after approved evidence", as
   registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
   const generated = await runLocalCodePipeline({ strategy, adapter, registry, worktree, repository: "payload", expectedCommit: commit, grant: { level: "L2" } });
   assert.equal(generated.status, "generated");
-  assert.ok(fsSync.existsSync(path.join(root, "src/app/(site)/home/page.tsx")));
+  assert.ok(fsSync.existsSync(path.join(root, "src/app/(frontend)/page.tsx")));
   fsSync.rmSync(root, { recursive: true, force: true });
 });
 

@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { PolicyError } from "./core.js";
+import { SqliteState } from "./sqlite-state.js";
 
 const SHA = /^[0-9a-f]{40}$/i;
 const STATES = new Set(["candidate", "approved", "revoked"]);
@@ -74,4 +75,17 @@ export class JsonBlockRegistry extends BlockRegistry {
 
   register(input) { const block = super.register(input); this.persist(); return block; }
   transition(...args) { const block = super.transition(...args); this.persist(); return block; }
+}
+
+export class SqliteBlockRegistry extends BlockRegistry {
+  constructor(file, options = {}) {
+    super(options);
+    this.state = new SqliteState(file, "registry", { version: this.version, blocks: [] });
+    this.version = this.state.data.version;
+    for (const block of this.state.data.blocks || []) this.blocks.set(block.id, Object.freeze(block));
+  }
+  persist() { this.state.save({ version: this.version, blocks: [...this.blocks.values()] }); }
+  register(input) { const block = super.register(input); this.persist(); return block; }
+  transition(...args) { const block = super.transition(...args); this.persist(); return block; }
+  close() { this.state.close(); }
 }

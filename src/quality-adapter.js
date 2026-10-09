@@ -20,7 +20,7 @@ export class QualityAdapter {
     if (testMode !== "read-only" && testMode !== "sandbox-write") throw new PolicyError("Unsupported QA test mode", "POLICY_DENIED");
     const checks = PROFILES[checkProfile];
     if (!checks) throw new PolicyError(`Unknown QA profile: ${checkProfile}`, "INVALID_INPUT");
-    const observations = await this.preview.inspect({ qaPreviewId, routes, locales, viewports, checks, testMode });
+    const observations = await this.preview.inspect({ qaPreviewId, candidateHash, routes, locales, viewports, checks, testMode });
     const results = [];
     for (const check of checks) {
       const checker = this.checkers.get(check);

@@ -26,7 +26,7 @@ export function composePagePlan({ strategy, registry, projectId, runId } = {}) {
     return {
       page: name,
       route: name === "home" ? "/" : `/${name}`,
-      file: `src/app/(site)/${name}/page.tsx`,
+      file: name === "home" ? "src/app/(frontend)/page.tsx" : `src/app/(frontend)/${name}/page.tsx`,
       components: blockNames.map((blockName) => ({
         name: blockName,
         registryId: byName.get(blockName).id,

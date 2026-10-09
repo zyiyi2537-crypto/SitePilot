@@ -2,6 +2,14 @@
 
 SitePilot is an evidence-driven, multi-agent website delivery workflow. It creates a strategy from a client's goal, evaluates CodeAtlas source evidence, writes only to an isolated worktree, and packages a candidate only after quality and review gates.
 
+## Local development status (2026-10)
+
+- `/studio` provides a local customer workflow and a separate reviewer view. Enter API/reviewer credentials only on a trusted local machine; the page holds them in memory and does not persist them. L2 credentials and CodeAtlas credentials are never requested by the page. Start with `SITEPILOT_HOST=127.0.0.1 npm run serve` after configuring API credentials, then open `http://127.0.0.1:3100/studio`.
+- CodeAtlas retrieval now supports bounded, line-verified pagination of its actual numbered `get_file` responses. Integration with the live index has **not** been verified in this environment because `CODEATLAS_MCP_URL` and `CODEATLAS_MCP_TOKEN` are absent. Run `npm run codeatlas:probe` with the server-side variables and approved repository list before calling this complete.
+- The generated React page is a scaffold with copied, pinned source evidence, not an imported/working approved component. The generated-candidate check validates manifest/file consistency only. It is **not** a Payload build, a functional contact form, or a ready website. The pinned Payload template requires a Node 24.15+ compatible isolated build workspace; do not run unreviewed generated dependencies or build scripts on the host.
+- Real Playwright QA is available via `PlaywrightPreviewAdapter` using installed `playwright-core` and a local Chrome executable. Configure `SITEPILOT_QA_PREVIEWS` as a JSON map of preview IDs to `{ "baseUrl": "http://127.0.0.1:PORT/", "candidateHash": "..." }` and `SITEPILOT_QA_ARTIFACT_ROOT` as an absolute screenshot directory. Only fixed localhost preview origins and read-only checks are accepted. The structural preview intentionally fails missing SEO/form checks; a generated site must run in a separate sandbox before delivery QA.
+- Set `SITEPILOT_DB_FILE=/absolute/path/sitepilot.sqlite` for SQLite-backed projects, runs, evidence, component registry and single-use L2 grants. Do not combine it with legacy JSON file variables. SQLite currently uses Node's experimental `node:sqlite`; the tool journal remains a separate store. L2 grants expire within 15 minutes, bind project/run/tool/path/page-plan hash, and can be revoked. Production deployment is deferred.
+
 ## V0 status
 
 The current vertical slice is intentionally dependency-free:

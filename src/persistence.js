@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { SitePilotStore, PolicyError } from "./core.js";
+import { SqliteState } from "./sqlite-state.js";
 
 const mapObject = (map) => Object.fromEntries(map.entries());
 
@@ -40,4 +41,27 @@ export class JsonSitePilotStore extends SitePilotStore {
   markQuality(...args) { const value = super.markQuality(...args); this.persist(); return value; }
   packageReview(...args) { const value = super.packageReview(...args); this.persist(); return value; }
   event(...args) { const value = super.event(...args); if (this.file) this.persist(); return value; }
+}
+
+export class SqliteSitePilotStore extends SitePilotStore {
+  constructor(file) {
+    super();
+    this.state = new SqliteState(file, "core", { projects: {}, runs: {}, tasks: {}, candidates: {}, drafts: {}, audit: [] });
+    for (const name of ["projects", "runs", "tasks", "candidates", "drafts"]) {
+      for (const [id, value] of Object.entries(this.state.data[name] || {})) this[name].set(id, value);
+    }
+    this.audit = this.state.data.audit || [];
+  }
+  persist() {
+    this.state.save({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit });
+  }
+  createProject(input) { const value = super.createProject(input); this.persist(); return value; }
+  createRun(...args) { const value = super.createRun(...args); this.persist(); return value; }
+  task(...args) { const value = super.task(...args); this.persist(); return value; }
+  completeTask(...args) { const value = super.completeTask(...args); this.persist(); return value; }
+  createCandidate(...args) { const value = super.createCandidate(...args); this.persist(); return value; }
+  markQuality(...args) { const value = super.markQuality(...args); this.persist(); return value; }
+  packageReview(...args) { const value = super.packageReview(...args); this.persist(); return value; }
+  event(...args) { const value = super.event(...args); if (this.state) this.persist(); return value; }
+  close() { this.state.close(); }
 }

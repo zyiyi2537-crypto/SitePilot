@@ -13,7 +13,8 @@ ENV NODE_ENV=production \
 WORKDIR /app
 RUN mkdir -p /var/lib/sitepilot /var/lib/sitepilot-worktrees /var/lib/sitepilot-quarantine \
     && chown -R node:node /var/lib/sitepilot /var/lib/sitepilot-worktrees /var/lib/sitepilot-quarantine
-COPY --chown=node:node package.json README.md ./
+COPY --chown=node:node package.json package-lock.json README.md ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY --chown=node:node src ./src
 USER node
 EXPOSE 3100

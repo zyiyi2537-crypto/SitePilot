@@ -7,6 +7,7 @@ import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
 import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
+import { PlaywrightPreviewAdapter } from "../src/playwright-preview.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 import { BlockRegistry } from "../src/registry.js";
@@ -58,6 +59,8 @@ test("component registry review requires reviewer credential and evidence", asyn
   const reviewer = "b".repeat(32);
   const server = createServer(store, { apiToken: token, reviewerToken: reviewer, reviewerId: "reviewer-1" });
   const commit = "a".repeat(40);
+  const bypass = await request(server, "POST", "/components", token, { name: "Bypass", kind: "hero", repository: "payload", commit, path: "src/Bypass.tsx", license: "MIT", state: "approved" });
+  assert.equal(bypass.body.state, "candidate");
   const created = await request(server, "POST", "/components", token, { name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT" });
   assert.equal(created.status, 201);
   const id = created.body.id;
@@ -138,7 +141,7 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   const commit = "d".repeat(40);
   const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
   registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
-  const codeAtlas = { getFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
+  const codeAtlas = { getCompleteFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
   const root = await fs.mkdtemp("/tmp/sitepilot-api-generation-");
   const l2Token = "c".repeat(32);
   const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
@@ -147,8 +150,12 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
   const plan = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
   assert.equal(plan.status, 200);
-  assert.equal((await request(server, "POST", `/runs/${run.id}/generate`, token, {})).status, 401);
-  const generated = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, {});
+  assert.equal((await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: "missing" })).status, 422);
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, "b".repeat(32), { tool: "other_tool", resource: "/tmp/elsewhere", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(grant.status, 201);
+  assert.equal(grant.body.tool, "generate_candidate");
+  assert.equal(grant.body.resource, `${root}/${run.id}`);
+  const generated = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: grant.body.id });
   assert.equal(generated.status, 201);
   assert.equal(generated.body.build.passed, true);
   assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
@@ -236,6 +243,22 @@ test("local preview is localhost-only and read-only", () => {
   assert.equal(preview.host, "127.0.0.1");
   assert.equal(preview.plan.routes[0].components[0].source.commit.length, 40);
   assert.throws(() => new LocalPreviewServer({ plan, host: "0.0.0.0" }), /localhost/);
+});
+
+test("Playwright QA visits local preview and binds it to candidate hash", async (t) => {
+  try { await fs.access("/usr/bin/google-chrome"); } catch { return t.skip("Chrome is unavailable"); }
+  const preview = new LocalPreviewServer({ plan: { routes: [{ route: "/", page: "home", components: [] }] } });
+  const address = await preview.listen();
+  const root = await fs.mkdtemp("/tmp/sitepilot-playwright-");
+  try {
+    const qa = new PlaywrightPreviewAdapter({ previews: { local: { baseUrl: `http://127.0.0.1:${address.port}/`, candidateHash: "candidate-1" } }, artifactRoot: root });
+    await assert.rejects(() => qa.inspect({ qaPreviewId: "local", candidateHash: "other", routes: ["/"], locales: ["en"], viewports: [{ width: 390, height: 844 }], testMode: "read-only" }), /does not match/);
+    const result = await qa.inspect({ qaPreviewId: "local", candidateHash: "candidate-1", routes: ["/"], locales: ["en"], viewports: [{ width: 390, height: 844 }], testMode: "read-only" });
+    assert.equal(result.observations[0].status, 200);
+    assert.equal(result.checks.responsive.passed, true);
+    assert.equal(result.checks.seo.passed, false);
+    assert.ok((await fs.stat(result.observations[0].screenshot)).size > 1000);
+  } finally { await preview.close(); await fs.rm(root, { recursive: true }); }
 });
 
 test("local build gate validates generated manifest and page files", async () => {
