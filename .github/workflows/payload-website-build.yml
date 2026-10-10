@@ -92,15 +92,12 @@ jobs:
           result=$?
           tail -n 100 build-output.log
           if [ "$result" -ne 0 ]; then
-            while IFS= read -r line; do
-              case "$line" in
-                *error*|*Error*|*failed*|*Failed*)
-                  line=${line//%/%25}
-                  line=${line//$'\r'/%0D}
-                  line=${line//$'\n'/%0A}
-                  echo "::error title=Payload Website build::$line"
-                  ;;
-              esac
-            done < <(grep -E -i -A 2 'module not found|cannot resolve|error:|failed to compile|build failed' build-output.log | tail -n 45)
+            node --input-type=module -e '
+              import fs from "node:fs";
+              const log = fs.readFileSync("build-output.log", "utf8").replace(/\x1b\[[0-9;]*m/g, "");
+              const excerpt = log.split("\n").slice(-100).join("\n").slice(-12000);
+              const escaped = excerpt.replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+              console.log(`::error title=Payload Website compiler output::${escaped}`);
+            '
           fi
           exit "$result"
