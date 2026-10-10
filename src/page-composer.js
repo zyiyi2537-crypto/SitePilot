@@ -14,6 +14,7 @@ function pageName(value) {
 export function composePagePlan({ strategy, registry, projectId, runId } = {}) {
   if (!strategy || !registry) throw new PolicyError("Strategy and block registry are required", "CONFIG_REQUIRED");
   const pages = Array.isArray(strategy.pageHierarchy) ? strategy.pageHierarchy : [];
+  if (new Set(pages).size !== pages.length) throw new PolicyError("Page hierarchy contains duplicate pages", "INVALID_INPUT");
   const blockNames = (strategy.blocks || []).map((value) => typeof value === "string" ? value : value?.name);
   const approved = registry.select({ locales: strategy.locales || [] });
   const byName = new Map(approved.map((block) => [block.name, block]));

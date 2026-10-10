@@ -368,6 +368,18 @@ test("page composer only uses approved registry components", () => {
   assert.throws(() => composePagePlan({ registry, strategy: { pageHierarchy: ["home"], blocks: ["ContactForm"] } }), /not approved/);
 });
 
+test("page composer rejects duplicate pages and generator sanitizes route names", async () => {
+  const registry = new BlockRegistry();
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit: "a".repeat(40), path: "Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  assert.throws(() => composePagePlan({ strategy: { locales: ["en"], pageHierarchy: ["home", "home"], blocks: ["Hero"] }, registry }), /duplicate/);
+  const plan = composePagePlan({ strategy: { locales: ["en"], pageHierarchy: ["product-detail"], blocks: ["Hero"] }, registry });
+  const writes = {};
+  await materializePagePlan({ plan, grant: { level: "L2" }, worktree: { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } } });
+  assert.match(writes["src/app/(frontend)/product-detail/page.tsx"], /function ProductDetailPage/);
+  assert.match(writes["SOURCES.md"], /No external component source/);
+});
+
 test("research agent searches every strategy block at a frozen commit", async () => {
   const commit = "b".repeat(40);
   const calls = [];
