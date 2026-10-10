@@ -41,8 +41,15 @@ export class PayloadBuildPipeline {
     const projectRoot = path.resolve(root, worktree.repositoryPathRef);
     const [actualRoot, actualProject] = await Promise.all([fs.realpath(root), fs.realpath(projectRoot)]);
     if (!actualProject.startsWith(`${actualRoot}${path.sep}`)) throw new PolicyError("Payload worktree escapes configured root", "POLICY_DENIED");
+    const head = (await this.git(["-C", actualProject, "rev-parse", "HEAD"])).trim().toLowerCase();
+    if (head !== lock.commit) throw new PolicyError("Payload worktree HEAD differs from lock", "STALE_REVISION");
+    const worktreeList = await this.git(["-C", this.sourceRoot, "worktree", "list", "--porcelain"]);
+    if (!worktreeList.split(/\n(?=worktree )/).some((entry) => entry.split("\n", 1)[0] === `worktree ${actualProject}`)) {
+      throw new PolicyError("Payload worktree is not registered by the pinned source", "STALE_REVISION");
+    }
     const lockPath = path.resolve(projectRoot, "pnpm-lock.yaml");
-    if (!lockPath.startsWith(`${root}${path.sep}`)) throw new PolicyError("Payload lockfile escapes worktree root", "POLICY_DENIED");
+    const actualLock = await fs.realpath(lockPath);
+    if (!actualLock.startsWith(`${actualProject}${path.sep}`)) throw new PolicyError("Payload lockfile escapes worktree root", "POLICY_DENIED");
     let runtime;
     try {
       runtime = await sandbox.run("node", ["--version"], { cwd: actualProject, timeout: 10_000, maxBuffer: 1024 });
@@ -52,6 +59,16 @@ export class PayloadBuildPipeline {
     }
     const version = /^v(\d+)\.(\d+)\.(\d+)/.exec(String(runtime.stdout || "").trim());
     if (!version || Number(version[1]) < 24 || Number(version[1]) === 24 && Number(version[2]) < 15) throw new PolicyError("Payload template requires Node 24.15+ in sandbox", "SANDBOX_REQUIRED");
+    let pnpm;
+    try {
+      pnpm = await sandbox.run("pnpm", ["--version"], { cwd: actualProject, timeout: 10_000, maxBuffer: 1024 });
+    } catch (error) {
+      if (error.code === "ENOENT" || /executable file not found|not found/i.test(error.stderr || error.message || "")) {
+        throw new PolicyError("Payload sandbox image must include pnpm; corepack alone is insufficient offline", "SANDBOX_REQUIRED");
+      }
+      throw error;
+    }
+    if (!/^\d+\.\d+\.\d+/.test(String(pnpm.stdout || "").trim())) throw new PolicyError("Payload sandbox pnpm version could not be verified", "SANDBOX_REQUIRED");
     const lockHash = crypto.createHash("sha256").update(await fs.readFile(lockPath)).digest("hex");
     const installer = new LockedDependencyInstaller({ worktreeRoot: root, sandbox, approvedWorkspaceFilters: ["website..."] });
     const install = await installer.install({ worktreePath: worktree.repositoryPathRef, packageManager: "pnpm", lockHash: { file: "pnpm-lock.yaml", sha256: lockHash }, workspaceFilter: "website...", grant });

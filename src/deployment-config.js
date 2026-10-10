@@ -8,7 +8,10 @@ export function validateDeploymentConfig(env = process.env) {
   }
   const tokens = [env.SITEPILOT_API_TOKEN, env.SITEPILOT_REVIEW_TOKEN, env.SITEPILOT_L2_TOKEN];
   if (tokens.some((token) => token.length < 32) || new Set(tokens).size !== tokens.length) throw new PolicyError("API, reviewer and L2 tokens must be distinct and at least 32 characters", "POLICY_DENIED");
-  for (const name of ["SITEPILOT_STATE_FILE", "SITEPILOT_REGISTRY_FILE", "SITEPILOT_EVIDENCE_FILE", "SITEPILOT_WORKTREE_ROOT", "SITEPILOT_QUARANTINE_ROOT"]) {
+  const legacyState = ["SITEPILOT_STATE_FILE", "SITEPILOT_REGISTRY_FILE", "SITEPILOT_EVIDENCE_FILE", "SITEPILOT_GRANTS_DB"];
+  if (env.SITEPILOT_DB_FILE && legacyState.some((name) => env[name])) throw new PolicyError("SQLite and legacy state files cannot be combined", "CONFIG_REQUIRED");
+  const statePaths = env.SITEPILOT_DB_FILE ? ["SITEPILOT_DB_FILE"] : legacyState.slice(0, 3);
+  for (const name of [...statePaths, "SITEPILOT_WORKTREE_ROOT", "SITEPILOT_QUARANTINE_ROOT"]) {
     if (!env[name] || !path.isAbsolute(env[name])) throw new PolicyError(`${name} must be an absolute path`, "CONFIG_REQUIRED");
   }
   if (!/^[1-9]\d{0,4}$/.test(String(env.PORT || "3100")) || Number(env.PORT || 3100) > 65535) throw new PolicyError("PORT must be between 1 and 65535", "INVALID_INPUT");
@@ -19,5 +22,5 @@ export function validateDeploymentConfig(env = process.env) {
   const payload = [env.PAYLOAD_SANDBOX_URL, env.PAYLOAD_SANDBOX_TOKEN];
   if (payload.some(Boolean) && payload.some((value) => !value)) throw new PolicyError("Payload sandbox URL and token must be configured together", "CONFIG_REQUIRED");
   if (env.PAYLOAD_SANDBOX_URL && new URL(env.PAYLOAD_SANDBOX_URL).protocol !== "https:") throw new PolicyError("Payload sandbox must use HTTPS", "POLICY_DENIED");
-  return Object.freeze({ valid: true, codeAtlasConfigured: codeAtlas.every(Boolean), payloadSandboxConfigured: payload.every(Boolean), persistentStoresConfigured: true });
+  return Object.freeze({ valid: true, codeAtlasConfigured: codeAtlas.every(Boolean), payloadSandboxConfigured: payload.every(Boolean), persistentStoresConfigured: true, stateBackend: env.SITEPILOT_DB_FILE ? "sqlite" : "json" });
 }

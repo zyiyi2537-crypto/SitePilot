@@ -3,6 +3,7 @@ node_modules
 test
 docs
 examples
-sources
+sources/*
+!sources/payload-website.lock.json
 ops
 npm-debug.log

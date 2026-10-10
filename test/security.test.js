@@ -258,9 +258,14 @@ test("deployment config requires durable paths and paired HTTPS integrations", (
     CODEATLAS_MCP_TOKEN: "secret", CODEATLAS_REPOSITORIES: "payload",
   };
   assert.equal(validateDeploymentConfig(config).codeAtlasConfigured, true);
+  assert.equal(validateDeploymentConfig(config).stateBackend, "json");
   assert.throws(() => validateDeploymentConfig({ ...config, SITEPILOT_REVIEW_TOKEN: config.SITEPILOT_API_TOKEN }), /distinct/);
   assert.throws(() => validateDeploymentConfig({ ...config, CODEATLAS_MCP_URL: "http://atcode.asia/mcp" }), /HTTPS/);
   assert.throws(() => validateDeploymentConfig({ ...config, SITEPILOT_REGISTRY_FILE: undefined }), /SITEPILOT_REGISTRY_FILE/);
+  const sqlite = { ...config, SITEPILOT_DB_FILE: "/var/lib/sitepilot/sitepilot.sqlite", SITEPILOT_STATE_FILE: undefined, SITEPILOT_REGISTRY_FILE: undefined, SITEPILOT_EVIDENCE_FILE: undefined };
+  assert.equal(validateDeploymentConfig(sqlite).stateBackend, "sqlite");
+  assert.throws(() => validateDeploymentConfig({ ...sqlite, SITEPILOT_STATE_FILE: config.SITEPILOT_STATE_FILE }), /cannot be combined/);
+  assert.throws(() => validateDeploymentConfig({ ...sqlite, SITEPILOT_DB_FILE: "relative.sqlite" }), /SITEPILOT_DB_FILE/);
 });
 
 test("local preview is localhost-only and read-only", () => {

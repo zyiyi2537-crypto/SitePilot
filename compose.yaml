@@ -9,9 +9,7 @@ services:
     environment:
       PORT: "3100"
       SITEPILOT_HOST: "0.0.0.0"
-      SITEPILOT_STATE_FILE: /var/lib/sitepilot/state.json
-      SITEPILOT_REGISTRY_FILE: /var/lib/sitepilot/registry.json
-      SITEPILOT_EVIDENCE_FILE: /var/lib/sitepilot/evidence.json
+      SITEPILOT_DB_FILE: /var/lib/sitepilot/sitepilot.sqlite
       SITEPILOT_WORKTREE_ROOT: /var/lib/sitepilot-worktrees
       SITEPILOT_QUARANTINE_ROOT: /var/lib/sitepilot-quarantine
     ports:
@@ -27,6 +25,8 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    mem_limit: 384m
+    pids_limit: 64
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

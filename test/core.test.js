@@ -650,13 +650,19 @@ test("Payload build pipeline checks sandbox Node version before install", async 
   const project = path.join(worktrees, "project", "run", "worktree");
   await fs.mkdir(source);
   await fs.mkdir(project, { recursive: true });
+  await fs.writeFile(path.join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
   const commands = [];
-  const runner = async (command, args) => { commands.push([command, args]); return { stdout: "v22.23.3\n" }; };
+  const runner = async (command, args) => {
+    commands.push([command, args]);
+    if (command === "git" && args.includes("rev-parse")) return { stdout: `${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    if (command === "git") return { stdout: `worktree ${project}\nHEAD ${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    return { stdout: "v22.23.3\n" };
+  };
   const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner });
   await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), /Node 24.15/);
-  assert.equal(commands.length, 1);
-  assert.equal(commands[0][0], "docker");
-  assert.deepEqual(commands[0][1].slice(-2), ["node", "--version"]);
+  assert.equal(commands.length, 3);
+  assert.equal(commands[2][0], "docker");
+  assert.deepEqual(commands[2][1].slice(-2), ["node", "--version"]);
   await fs.rm(root, { recursive: true });
 });
 
@@ -667,8 +673,68 @@ test("Payload build pipeline reports missing Docker without host fallback", asyn
   const project = path.join(worktrees, "project", "run", "worktree");
   await fs.mkdir(source);
   await fs.mkdir(project, { recursive: true });
-  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner: async () => { throw Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" }); } });
+  await fs.writeFile(path.join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner: async (command, args) => {
+    if (command === "git" && args.includes("rev-parse")) return { stdout: `${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    if (command === "git") return { stdout: `worktree ${project}\nHEAD ${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    throw Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" });
+  } });
   await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "SANDBOX_REQUIRED");
+  await fs.rm(root, { recursive: true });
+});
+
+test("Payload build reports an image without pnpm before dependency installation", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-payload-pnpm-");
+  const source = path.join(root, "source");
+  const worktrees = path.join(root, "worktrees");
+  const project = path.join(worktrees, "project", "run", "worktree");
+  await fs.mkdir(source);
+  await fs.mkdir(project, { recursive: true });
+  await fs.writeFile(path.join(project, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+  let dockerCalls = 0;
+  const runner = async (command, args) => {
+    if (command === "git" && args.includes("rev-parse")) return { stdout: `${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    if (command === "git") return { stdout: `worktree ${project}\nHEAD ${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    dockerCalls++;
+    if (args.at(-2) === "node") return { stdout: "v24.21.0\n" };
+    throw Object.assign(new Error("executable file not found"), { stderr: "executable file not found" });
+  };
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner });
+  await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "SANDBOX_REQUIRED" && /pnpm/.test(error.message));
+  assert.equal(dockerCalls, 2);
+  await fs.rm(root, { recursive: true });
+});
+
+test("Payload build rejects an unregistered or changed worktree before Docker", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-payload-stale-");
+  const source = path.join(root, "source");
+  const worktrees = path.join(root, "worktrees");
+  const project = path.join(worktrees, "project", "run", "worktree");
+  await fs.mkdir(source);
+  await fs.mkdir(project, { recursive: true });
+  let dockerCalled = false;
+  const runner = async (command, args) => {
+    if (command === "docker") dockerCalled = true;
+    if (args.includes("rev-parse")) return { stdout: `${PINNED_SOURCES.payloadWebsite.commit}\n` };
+    return { stdout: `worktree ${source}\nHEAD ${PINNED_SOURCES.payloadWebsite.commit}\n` };
+  };
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner });
+  await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "STALE_REVISION");
+  assert.equal(dockerCalled, false);
+  await fs.rm(root, { recursive: true });
+});
+
+test("locked dependency install rejects a lockfile symlink outside the worktree", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-locklink-");
+  const worktree = path.join(root, "worktree");
+  await fs.mkdir(worktree);
+  await fs.writeFile(path.join(root, "outside-lock.yaml"), "lockfileVersion: '9.0'\n");
+  await fs.symlink(path.join(root, "outside-lock.yaml"), path.join(worktree, "pnpm-lock.yaml"));
+  let dockerCalled = false;
+  const sandbox = new DockerSandboxRunner({ image: `node@sha256:${"a".repeat(64)}`, runner: async () => { dockerCalled = true; return { stdout: "" }; } });
+  const installer = new LockedDependencyInstaller({ worktreeRoot: root, sandbox });
+  await assert.rejects(() => installer.install({ worktreePath: "worktree", packageManager: "pnpm", lockHash: { file: "pnpm-lock.yaml" }, grant: { level: "L2" } }), (error) => error.code === "POLICY_DENIED");
+  assert.equal(dockerCalled, false);
   await fs.rm(root, { recursive: true });
 });
 

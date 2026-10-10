@@ -73,7 +73,9 @@ export class LockedDependencyInstaller {
     const root = await safeRoot(this.worktreeRoot, worktreePath);
     if (!LOCKFILES.has(String(lockHash?.file || ""))) throw new PolicyError("A supported lockfile is required", "LOCKFILE_REQUIRED");
     if (!Array.isArray(registryAllowlist) || registryAllowlist.some((value) => typeof value !== "string" || !/^https:\/\//.test(value))) throw new PolicyError("Registry allowlist must contain HTTPS URLs", "POLICY_DENIED");
-    const lockContent = await fs.readFile(path.join(root, lockHash.file));
+    const lockPath = await fs.realpath(path.join(root, lockHash.file));
+    if (!lockPath.startsWith(`${root}${path.sep}`)) throw new PolicyError("Lockfile resolves outside worktree", "POLICY_DENIED");
+    const lockContent = await fs.readFile(lockPath);
     const actualHash = crypto.createHash("sha256").update(lockContent).digest("hex");
     if (lockHash.sha256 && lockHash.sha256 !== actualHash) throw new PolicyError("Lockfile hash does not match worktree", "STALE_REVISION");
     if (workspaceFilter && !this.approvedWorkspaceFilters.has(workspaceFilter)) throw new PolicyError("Workspace filter is not approved", "POLICY_DENIED");

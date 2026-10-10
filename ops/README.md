@@ -22,8 +22,10 @@ Use `SITEPILOT_NODE_IMAGE` with a reviewed Node 24 image digest for release depl
 
 The included Nginx file is a local-only example. Before public exposure, install a TLS vhost, enforce request rate limits, and verify firewall rules. Do not expose port 3100 directly.
 
-This deploys only a single-instance SitePilot control plane. JSON snapshots use atomic replacement and private file permissions, but do not provide cross-process locking, transactions, or concurrent-write guarantees. Migrate to SQLite/PostgreSQL before enabling multiple API processes or treating the service as high availability. On a 2 GB-class server, keep builds and browser QA on a separately measured worker.
+This deploys only a single-instance SitePilot control plane. Compose persists project, evidence, registry, and L2 grant state in SQLite. Do not run multiple API processes or treat this as high availability; the current in-memory state cache still requires one writer. Existing JSON deployments need an explicit data migration before switching to this Compose configuration. On a 2 GB-class server, keep builds and browser QA on a separately measured worker.
 
 Set distinct random values of at least 32 characters for `SITEPILOT_API_TOKEN`, `SITEPILOT_REVIEW_TOKEN`, and `SITEPILOT_L2_TOKEN`, plus a server-owned `SITEPILOT_REVIEWER_ID`. `npm run deploy:check` rejects missing, weak, shared, or inconsistent integration configuration without printing credentials. Never place reviewer or L2 tokens in the browser or Agent environment. The L2 token is a temporary service credential for local code generation, not the project-scoped expiring grant model required by the PRD for multi-tenant production use.
+
+Leave all three `CODEATLAS_*` values empty when starting only the control plane; configure URL, token, and repository allowlist together before enabling live retrieval. Compose caps the API container at 384 MB and does not run Payload builds or browser QA.
 
 Docker is not installed in the current local development environment, so the Compose image and runtime have not been exercised here. The existing `ops/install.sh` and systemd deployment remain available for hosts that do not use Compose; populate both registry/evidence paths in the environment file before using that route.
