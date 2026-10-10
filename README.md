@@ -27,7 +27,7 @@ The CodeAtlas MCP adapter is now connected in `src/codeatlas.js`. Set `CODEATLAS
 
 ## Run
 
-The `Pinned Payload Website build` GitHub Actions workflow attempts a first production bundle of the fixed upstream Website Template on a hosted runner. It fetches only the locked Payload commit, verifies the template manifest, installs with the upstream lockfile, builds runtime workspace dependencies, and runs the template's Next.js production build against a disposable Mongo service. CI-only configuration adds monorepo aliases and temporarily renames the template's `tsconfig.json` so Next performs a bundle-only check; TypeScript validation remains a separate follow-up requirement. It does not deploy a site, create customer CMS drafts, run the upstream `payload build` wrapper, or certify the SitePilot sandbox build path. The workflow runs when its file changes and can also be started manually from Actions.
+The `Pinned Payload Website build` GitHub Actions workflow attempts a first production compilation of the fixed upstream Website Template on a hosted runner. It fetches only the locked Payload commit, verifies the template manifest, installs with the upstream lockfile, builds runtime workspace dependencies, and runs Next's experimental `compile` build mode. CI-only configuration adds monorepo aliases. A passing compile check does not include TypeScript validation, route generation, CMS drafts, a running preview, or the upstream `payload build` wrapper. The workflow runs when its file changes and can also be started manually from Actions.
 
 ```bash
 npm test
