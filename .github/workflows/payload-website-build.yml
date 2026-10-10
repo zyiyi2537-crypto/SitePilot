@@ -99,7 +99,7 @@ jobs:
             let source = fs.readFileSync(nextConfig, "utf8");
             const marker = "webpackConfig.resolve.extensionAlias = {";
             if (!source.includes(marker)) throw new Error("Unexpected Website webpack config");
-            source = source.replace(marker, `webpackConfig.resolve.alias = { ...(webpackConfig.resolve.alias || {}), "@": path.resolve(dirname, "src") };\n    ${marker}`);
+            source = source.replace(marker, `webpackConfig.resolve.alias = { ...(webpackConfig.resolve.alias || {}), "@": path.resolve(dirname, "src"), "@payload-config": path.resolve(dirname, "src/payload.config.ts") };\n    ${marker}`);
             fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
