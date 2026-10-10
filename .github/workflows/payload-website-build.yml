@@ -100,7 +100,6 @@ jobs:
             const marker = "webpackConfig.resolve.extensionAlias = {";
             if (!source.includes(marker)) throw new Error("Unexpected Website webpack config");
             source = source.replace(marker, `webpackConfig.resolve.alias = { ...(webpackConfig.resolve.alias || {}), "@": path.resolve(dirname, "src"), "@payload-config": path.resolve(dirname, "src/payload.config.ts") };\n    ${marker}`);
-            source = source.replace("const nextConfig: NextConfig = {", "const nextConfig: NextConfig = {\n  typescript: { ignoreBuildErrors: true },");
             fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
@@ -109,6 +108,7 @@ jobs:
           ln -s ../../../node_modules/typescript templates/website/node_modules/typescript
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
           corepack pnpm --filter website exec node -e 'const fs = require("node:fs"); const path = require("node:path"); for (const [name, file] of [["typescript", "lib/typescript.js"], ["@types/react", "index.d.ts"], ["@types/node", "index.d.ts"]]) { try { const location = path.join(path.dirname(require.resolve(`${name}/package.json`)), file); console.log(`::notice title=Website dependency resolution::${name} ${location} exists=${fs.existsSync(location)}`) } catch (error) { console.log(`::error title=Website dependency resolution::${name} ${error.code}`) } }'
+          corepack pnpm --filter website exec node -e 'const { hasNecessaryDependencies } = require("next/dist/lib/has-necessary-dependencies"); const packages = [{pkg:"typescript",file:"typescript/lib/typescript.js",exportsRestrict:true},{pkg:"@types/react",file:"@types/react/index.d.ts",exportsRestrict:true},{pkg:"@types/node",file:"@types/node/index.d.ts",exportsRestrict:true}]; const result=hasNecessaryDependencies(process.cwd(),packages); console.log(`::notice title=Next dependency check::missing=${JSON.stringify(result.missing)} resolved=${JSON.stringify([...result.resolved])}`)'
           corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
           tail -n 100 build-output.log
