@@ -132,6 +132,7 @@ jobs:
           cp ci-results/draft-plan.json payload-source/templates/website/sitepilot-draft-plan.json
           cp ci/payload-seed.ts payload-source/templates/website/sitepilot-seed.ts
           cp ci/payload-preview.ts payload-source/templates/website/sitepilot-preview.ts
+          cp ci/payload-command.mjs payload-source/templates/website/sitepilot-command.mjs
           password=$(openssl rand -hex 24)
           preview_secret=$(openssl rand -hex 24)
           echo "::add-mask::$password"
@@ -140,7 +141,7 @@ jobs:
           echo "PREVIEW_SECRET=$preview_secret" >> "$GITHUB_ENV"
       - name: Persist and verify real Payload CMS draft
         working-directory: payload-source/templates/website
-        run: corepack pnpm exec tsx sitepilot-seed.ts
+        run: node sitepilot-command.mjs corepack pnpm exec tsx sitepilot-seed.ts
       - name: Install Chromium for real preview acceptance
         working-directory: payload-source/templates/website
         run: corepack pnpm exec playwright install --with-deps chromium
@@ -167,7 +168,7 @@ jobs:
             tail -n 80 sitepilot-server.log
             exit 1
           fi
-          corepack pnpm exec tsx sitepilot-preview.ts
+          node sitepilot-command.mjs corepack pnpm exec tsx sitepilot-preview.ts
       - name: Upload synthetic draft acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
