@@ -95,6 +95,12 @@ jobs:
             if (config.compilerOptions?.paths?.["@/*"]?.[0] !== "./src/*") throw new Error("Unexpected Website path alias");
             config.compilerOptions.baseUrl = ".";
             fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+            const nextConfig = "templates/website/next.config.ts";
+            let source = fs.readFileSync(nextConfig, "utf8");
+            const marker = "webpackConfig.resolve.extensionAlias = {";
+            if (!source.includes(marker)) throw new Error("Unexpected Website webpack config");
+            source = source.replace(marker, `webpackConfig.resolve.alias = { ...(webpackConfig.resolve.alias || {}), "@": path.resolve(dirname, "src") };\n    ${marker}`);
+            fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
