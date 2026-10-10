@@ -88,7 +88,7 @@ jobs:
         run: |
           set +e
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
-          corepack pnpm --filter website exec next build > build-output.log 2>&1
+          corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
           tail -n 100 build-output.log
           if [ "$result" -ne 0 ]; then
