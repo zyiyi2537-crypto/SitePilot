@@ -5,6 +5,9 @@ on:
   push:
     paths:
       - .github/workflows/payload-website-build.yml
+      - ci/payload-*
+      - src/payload-template.js
+      - sources/payload-website.lock.json
 
 permissions:
   contents: read
@@ -15,7 +18,8 @@ jobs:
     timeout-minutes: 45
     env:
       PAYLOAD_SECRET: ci-only-not-for-production-32-character-secret
-      DATABASE_URI: mongodb://127.0.0.1:27017/sitepilot_payload_ci
+      DATABASE_URL: mongodb://127.0.0.1:27017/sitepilot_payload_ci
+      NEXT_PUBLIC_SERVER_URL: http://127.0.0.1:3000
       NEXT_TELEMETRY_DISABLED: "1"
       CI: "1"
     services:
@@ -122,3 +126,58 @@ jobs:
             '
           fi
           exit "$result"
+      - name: Create synthetic draft with SitePilot planner
+        run: |
+          node ci/payload-fixture.mjs
+          cp ci-results/draft-plan.json payload-source/templates/website/sitepilot-draft-plan.json
+          cp ci/payload-seed.ts payload-source/templates/website/sitepilot-seed.ts
+          cp ci/payload-preview.ts payload-source/templates/website/sitepilot-preview.ts
+          password=$(openssl rand -hex 24)
+          preview_secret=$(openssl rand -hex 24)
+          echo "::add-mask::$password"
+          echo "::add-mask::$preview_secret"
+          echo "SITEPILOT_CI_PASSWORD=$password" >> "$GITHUB_ENV"
+          echo "PREVIEW_SECRET=$preview_secret" >> "$GITHUB_ENV"
+      - name: Persist and verify real Payload CMS draft
+        working-directory: payload-source/templates/website
+        run: corepack pnpm exec tsx sitepilot-seed.ts
+      - name: Install Chromium for real preview acceptance
+        working-directory: payload-source/templates/website
+        run: corepack pnpm exec playwright install --with-deps chromium
+      - name: Start website and verify authenticated draft preview
+        working-directory: payload-source/templates/website
+        timeout-minutes: 8
+        run: |
+          corepack pnpm exec next start --hostname 127.0.0.1 > sitepilot-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=0
+          for attempt in $(seq 1 60); do
+            if curl --silent --fail http://127.0.0.1:3000/api/users/me > /dev/null; then
+              ready=1
+              break
+            fi
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              tail -n 80 sitepilot-server.log
+              exit 1
+            fi
+            sleep 2
+          done
+          if [ "$ready" -ne 1 ]; then
+            tail -n 80 sitepilot-server.log
+            exit 1
+          fi
+          corepack pnpm exec tsx sitepilot-preview.ts
+      - name: Upload synthetic draft acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: payload-draft-acceptance-${{ github.run_id }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            ci-results/draft-plan.json
+            payload-source/templates/website/sitepilot-cms-receipt.json
+            payload-source/templates/website/sitepilot-preview-report.json
+            payload-source/templates/website/sitepilot-desktop.png
+            payload-source/templates/website/sitepilot-mobile.png
