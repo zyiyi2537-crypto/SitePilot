@@ -101,6 +101,6 @@ jobs:
                   echo "::error title=Payload Website build::$line"
                   ;;
               esac
-            done < <(tail -n 30 build-output.log)
+            done < <(grep -E -i -A 2 'module not found|cannot resolve|error:|failed to compile|build failed' build-output.log | tail -n 45)
           fi
           exit "$result"
