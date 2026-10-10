@@ -103,6 +103,7 @@ jobs:
             fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
+          mv templates/website/tsconfig.json templates/website/tsconfig.ci.json
           test -f node_modules/typescript/package.json
           test ! -e templates/website/node_modules/typescript
           ln -s ../../../node_modules/typescript templates/website/node_modules/typescript
