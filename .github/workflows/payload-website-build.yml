@@ -62,7 +62,7 @@ jobs:
         run: |
           corepack enable
           corepack pnpm --version
-          corepack pnpm install --filter website... --frozen-lockfile --ignore-scripts
+          corepack pnpm install --filter website... --filter . --frozen-lockfile --ignore-scripts
       - name: Build website workspace runtime dependencies
         working-directory: payload-source
         run: |
