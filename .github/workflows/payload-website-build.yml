@@ -1,0 +1,68 @@
+name: Pinned Payload Website build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/payload-website-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  website-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PAYLOAD_SECRET: ci-only-not-for-production-32-character-secret
+      DATABASE_URI: mongodb://127.0.0.1:27017/sitepilot_payload_ci
+      NEXT_TELEMETRY_DISABLED: "1"
+      CI: "1"
+    services:
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.15.0"
+      - name: Read fixed source lock
+        id: source
+        run: |
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const lock = JSON.parse(fs.readFileSync("sources/payload-website.lock.json", "utf8"));
+            if (lock.repositoryUrl !== "https://github.com/payloadcms/payload.git" || !/^[0-9a-f]{40}$/.test(lock.commit)) throw new Error("Unexpected Payload source lock");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `commit=${lock.commit}\n`);
+          '
+      - name: Fetch fixed Payload source with sparse checkout
+        run: |
+          git init --quiet payload-source
+          git -C payload-source remote add origin https://github.com/payloadcms/payload.git
+          git -C payload-source -c protocol.version=2 fetch --quiet --no-tags --depth=1 --filter=blob:none origin "${{ steps.source.outputs.commit }}"
+          git -C payload-source sparse-checkout init --no-cone
+          git -C payload-source sparse-checkout set --no-cone -- templates/website packages LICENSE.md package.json pnpm-workspace.yaml pnpm-lock.yaml .node-version .nvmrc tsconfig.json
+          git -C payload-source checkout --quiet --detach "${{ steps.source.outputs.commit }}"
+          test "$(git -C payload-source rev-parse HEAD)" = "${{ steps.source.outputs.commit }}"
+          test -f payload-source/templates/website/package.json
+      - name: Verify fixed template manifest
+        run: |
+          node --input-type=module -e '
+            import lock from "./sources/payload-website.lock.json" with { type: "json" };
+            import { TemplateSnapshotVerifier } from "./src/template-verifier.js";
+            const result = await new TemplateSnapshotVerifier({ lock, root: `${process.cwd()}/payload-source` }).verify();
+            console.log(`Payload ${result.commit}, template manifest ${result.manifestHash}`);
+          '
+      - name: Install frozen website workspace dependencies
+        working-directory: payload-source
+        run: |
+          corepack enable
+          corepack pnpm --version
+          corepack pnpm install --filter website... --frozen-lockfile --ignore-scripts
+      - name: Build Payload Website Template
+        working-directory: payload-source
+        run: corepack pnpm --filter website build

@@ -27,6 +27,8 @@ The CodeAtlas MCP adapter is now connected in `src/codeatlas.js`. Set `CODEATLAS
 
 ## Run
 
+The `Pinned Payload Website build` GitHub Actions workflow performs a first real build of the fixed upstream Website Template on a hosted runner. It fetches only the locked Payload commit, verifies the template manifest, installs with the upstream lockfile, and runs `website build` against a disposable Mongo service. It does not deploy a site, create customer CMS drafts, or certify the SitePilot sandbox build path. The workflow runs when its file changes and can also be started manually from Actions.
+
 ```bash
 npm test
 npm run check
