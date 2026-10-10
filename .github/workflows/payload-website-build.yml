@@ -63,9 +63,26 @@ jobs:
           corepack enable
           corepack pnpm --version
           corepack pnpm install --filter website... --frozen-lockfile --ignore-scripts
-      - name: Build website workspace dependencies
+      - name: Build website workspace runtime dependencies
         working-directory: payload-source
-        run: corepack pnpm -r --filter 'website^...' run build
+        run: |
+          set +e
+          corepack pnpm -r --filter 'website^...' --if-present run build:swc > dependency-build.log 2>&1
+          result=$?
+          tail -n 100 dependency-build.log
+          if [ "$result" -ne 0 ]; then
+            while IFS= read -r line; do
+              case "$line" in
+                *error*|*Error*|*failed*|*Failed*)
+                  line=${line//%/%25}
+                  line=${line//$'\r'/%0D}
+                  line=${line//$'\n'/%0A}
+                  echo "::error title=Payload dependency build::$line"
+                  ;;
+              esac
+            done < <(tail -n 30 dependency-build.log)
+          fi
+          exit "$result"
       - name: Build Payload Website Template
         working-directory: payload-source
         run: |
