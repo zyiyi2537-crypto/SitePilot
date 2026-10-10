@@ -108,7 +108,7 @@ jobs:
           test ! -e templates/website/node_modules/typescript
           ln -s ../../../node_modules/typescript templates/website/node_modules/typescript
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
-          corepack pnpm --filter website exec node -e 'for (const name of ["typescript/package.json", "@types/react/package.json", "@types/node/package.json"]) { try { console.log(`::notice title=Website dependency resolution::${name} ${require.resolve(name)}`) } catch (error) { console.log(`::error title=Website dependency resolution::${name} ${error.code}`) } }'
+          corepack pnpm --filter website exec node -e 'const fs = require("node:fs"); const path = require("node:path"); for (const [name, file] of [["typescript", "lib/typescript.js"], ["@types/react", "index.d.ts"], ["@types/node", "index.d.ts"]]) { try { const location = path.join(path.dirname(require.resolve(`${name}/package.json`)), file); console.log(`::notice title=Website dependency resolution::${name} ${location} exists=${fs.existsSync(location)}`) } catch (error) { console.log(`::error title=Website dependency resolution::${name} ${error.code}`) } }'
           corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
           tail -n 100 build-output.log
