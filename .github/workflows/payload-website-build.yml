@@ -63,6 +63,9 @@ jobs:
           corepack enable
           corepack pnpm --version
           corepack pnpm install --filter website... --frozen-lockfile --ignore-scripts
+      - name: Build website workspace dependencies
+        working-directory: payload-source
+        run: corepack pnpm -r --filter 'website^...' run build
       - name: Build Payload Website Template
         working-directory: payload-source
         run: |
