@@ -103,6 +103,9 @@ jobs:
             fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
+          test -f node_modules/typescript/package.json
+          test ! -e templates/website/node_modules/typescript
+          ln -s ../../../node_modules/typescript templates/website/node_modules/typescript
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
           corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
