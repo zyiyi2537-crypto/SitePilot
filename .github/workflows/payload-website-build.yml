@@ -87,6 +87,16 @@ jobs:
         working-directory: payload-source
         run: |
           set +e
+          test -f templates/website/src/providers/HeaderTheme/index.tsx
+          node --input-type=module -e '
+            import fs from "node:fs";
+            const file = "templates/website/tsconfig.json";
+            const config = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (config.compilerOptions?.paths?.["@/*"]?.[0] !== "./src/*") throw new Error("Unexpected Website path alias");
+            config.compilerOptions.baseUrl = ".";
+            fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`);
+          '
+          git diff -- templates/website/tsconfig.json
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
           corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
