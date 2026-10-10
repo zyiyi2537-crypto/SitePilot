@@ -107,6 +107,7 @@ jobs:
           test ! -e templates/website/node_modules/typescript
           ln -s ../../../node_modules/typescript templates/website/node_modules/typescript
           corepack pnpm --filter website exec node -e 'console.log(require.resolve("next/package.json"))'
+          corepack pnpm --filter website exec node -e 'for (const name of ["typescript/package.json", "@types/react/package.json", "@types/node/package.json"]) { try { console.log(name, require.resolve(name)) } catch (error) { console.log(name, error.code) } }'
           corepack pnpm --filter website exec next build --webpack > build-output.log 2>&1
           result=$?
           tail -n 100 build-output.log
