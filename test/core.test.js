@@ -19,6 +19,8 @@ import { buildIndustrialSlice } from "../src/vertical-slice.js";
 import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import { TemplateSnapshotVerifier } from "../src/template-verifier.js";
+import { PayloadBuildPipeline } from "../src/payload-build.js";
+import { createPayloadDraftPlan } from "../src/payload-template.js";
 import { createPinnedSourceFetcher, PINNED_SOURCES } from "../src/pinned-sources.js";
 import { planPayloadSchema } from "../src/payload-schema.js";
 import { planComponents } from "../src/component-planner.js";
@@ -627,4 +629,56 @@ test("template verifier requires the locked files and computes a manifest", asyn
   assert.equal(verified.verified, true);
   assert.match(verified.manifestHash, /^[0-9a-f]{64}$/);
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("Payload build pipeline requires L2 and a pinned Docker image before execution", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-payload-build-");
+  const source = path.join(root, "source");
+  const worktrees = path.join(root, "worktrees");
+  await fs.mkdir(source);
+  await fs.mkdir(worktrees);
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees });
+  await assert.rejects(() => pipeline.prepare({ projectId: "project", runId: "run" }), /L2/);
+  await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), /pinned by sha256/);
+  await fs.rm(root, { recursive: true });
+});
+
+test("Payload build pipeline checks sandbox Node version before install", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-payload-node-");
+  const source = path.join(root, "source");
+  const worktrees = path.join(root, "worktrees");
+  const project = path.join(worktrees, "project", "run", "worktree");
+  await fs.mkdir(source);
+  await fs.mkdir(project, { recursive: true });
+  const commands = [];
+  const runner = async (command, args) => { commands.push([command, args]); return { stdout: "v22.23.3\n" }; };
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner });
+  await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), /Node 24.15/);
+  assert.equal(commands.length, 1);
+  assert.equal(commands[0][0], "docker");
+  assert.deepEqual(commands[0][1].slice(-2), ["node", "--version"]);
+  await fs.rm(root, { recursive: true });
+});
+
+test("Payload build pipeline reports missing Docker without host fallback", async () => {
+  const root = await fs.mkdtemp("/tmp/sitepilot-payload-no-docker-");
+  const source = path.join(root, "source");
+  const worktrees = path.join(root, "worktrees");
+  const project = path.join(worktrees, "project", "run", "worktree");
+  await fs.mkdir(source);
+  await fs.mkdir(project, { recursive: true });
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: source, worktreeRoot: worktrees, image: `node@sha256:${"a".repeat(64)}`, runner: async () => { throw Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" }); } });
+  await assert.rejects(() => pipeline.build({ candidateId: "candidate", worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "SANDBOX_REQUIRED");
+  await fs.rm(root, { recursive: true });
+});
+
+test("Payload draft plan emits real Website Template pages and blocks unsupported schemas", () => {
+  const content = { home: { title: "Demo", heroTitle: "Demo home", description: "Home content", cta: "Contact", claimRefs: ["claim_home"] }, contact: { title: "Contact", heroTitle: "Contact us", description: "Contact content", cta: "Send inquiry", claimRefs: ["claim_contact"] } };
+  const plan = createPayloadDraftPlan({ projectId: "project_1", contentByPage: content, strategy: { pageHierarchy: ["home", "contact"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] } });
+  assert.equal(plan.operations.length, 2);
+  assert.equal(plan.operations[0].collection, "pages");
+  assert.equal(plan.operations[0].data.hero.type, "lowImpact");
+  assert.equal(plan.operations[0].data.layout[0].blockType, "content");
+  assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["ProductGrid"], locales: ["en"] }, contentByPage: { home: content.home } }), /schema/);
+  assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN", "en"] }, contentByPage: { home: content.home } }), /localization/);
 });

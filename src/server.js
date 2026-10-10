@@ -17,8 +17,10 @@ import fs from "node:fs/promises";
 import { GrantStore, SqliteGrantStore } from "./grants.js";
 import { QualityAdapter } from "./quality-adapter.js";
 import { PlaywrightPreviewAdapter } from "./playwright-preview.js";
+import { PayloadBuildPipeline } from "./payload-build.js";
+import { PINNED_SOURCES } from "./pinned-sources.js";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore()) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null) {
   const generatingRuns = new Set();
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
@@ -60,8 +62,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
       const grantRevokeMatch = url.pathname.match(/^\/grants\/([^/]+)\/revoke$/);
+      const payloadPrepareMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-prepare$/);
+      const payloadBuildMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-build$/);
       if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && generateMatch ? l2Token : apiToken;
+      if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/projects") return send(res, 200, { projects: [...store.projects.values()] });
       const projectRunsMatch = url.pathname.match(/^\/projects\/([^/]+)\/runs$/);
@@ -111,12 +116,28 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         return send(res, 201, run);
       }
       if (req.method === "POST" && grantMatch) {
-        if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
         const run = store.runs.get(grantMatch[1]);
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const input = await readJson(req);
-        if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
-        const grant = grants.issue({ projectId: run.projectId, runId: run.id, tool: "generate_candidate", resource: path.resolve(generation.worktreeRoot, run.id), planHash: run.pagePlan.sourceManifestHash, expiresAt: input.expiresAt, issuedBy: reviewerId });
+        const tool = input.tool || "generate_candidate";
+        let resource;
+        let planHash;
+        if (tool === "generate_candidate") {
+          if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+          if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+          resource = path.resolve(generation.worktreeRoot, run.id);
+          planHash = run.pagePlan.sourceManifestHash;
+        } else if (tool === "prepare_payload_template") {
+          if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
+          if (run.payloadWorktree) return send(res, 409, { code: "WORKTREE_ALREADY_EXISTS" });
+          resource = path.resolve(payloadBuild.worktreeRoot, run.projectId, run.id);
+          planHash = PINNED_SOURCES.payloadWebsite.commit;
+        } else if (tool === "build_payload_template") {
+          if (!payloadBuild || !run.payloadWorktree) return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+          resource = path.resolve(payloadBuild.worktreeRoot, run.payloadWorktree.repositoryPathRef);
+          planHash = PINNED_SOURCES.payloadWebsite.commit;
+        } else return send(res, 422, { code: "TOOL_NOT_APPROVED" });
+        const grant = grants.issue({ projectId: run.projectId, runId: run.id, tool, resource, planHash, expiresAt: input.expiresAt, issuedBy: reviewerId });
         store.event(run.id, "grant.issued", { grantId: grant.id, tool: grant.tool, resource: grant.resource });
         return send(res, 201, grant);
       }
@@ -124,6 +145,30 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const grant = grants.revoke(grantRevokeMatch[1]);
         store.event(grant.runId, "grant.revoked", { grantId: grant.id });
         return send(res, 200, grant);
+      }
+      if (req.method === "POST" && payloadPrepareMatch) {
+        if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
+        const run = store.runs.get(payloadPrepareMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (run.status === "superseded" || run.payloadWorktree) return send(res, 409, { code: "WORKTREE_ALREADY_EXISTS" });
+        const input = await readJson(req);
+        grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "prepare_payload_template", resource: path.resolve(payloadBuild.worktreeRoot, run.projectId, run.id), planHash: PINNED_SOURCES.payloadWebsite.commit });
+        const prepared = await payloadBuild.prepare({ projectId: run.projectId, runId: run.id, grant: { level: "L2" } });
+        run.payloadWorktree = prepared;
+        store.event(run.id, "payload.worktree.prepared", { worktreeId: prepared.worktreeId, templateCommit: prepared.baseCommit });
+        return send(res, 201, prepared);
+      }
+      if (req.method === "POST" && payloadBuildMatch) {
+        if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
+        const run = store.runs.get(payloadBuildMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (!run.payloadWorktree) return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+        const input = await readJson(req);
+        grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "build_payload_template", resource: path.resolve(payloadBuild.worktreeRoot, run.payloadWorktree.repositoryPathRef), planHash: PINNED_SOURCES.payloadWebsite.commit });
+        const report = await payloadBuild.build({ candidateId: `template_${run.id}`, worktree: run.payloadWorktree, grant: { level: "L2" } });
+        run.payloadTemplateBuild = report;
+        store.event(run.id, "payload.template.built", { reportHash: report.build?.reportHash, templateCommit: report.sourceCommit });
+        return send(res, 200, report);
       }
       const answersMatch = url.pathname.match(/^\/runs\/([^/]+)\/answers$/);
       if (req.method === "POST" && answersMatch) {
@@ -247,7 +292,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });
@@ -270,5 +315,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   if (host !== "127.0.0.1" && host !== "0.0.0.0") throw new Error("SITEPILOT_HOST must be 127.0.0.1 or 0.0.0.0");
   const grants = databaseFile ? new SqliteGrantStore(databaseFile) : process.env.SITEPILOT_GRANTS_DB ? new SqliteGrantStore(process.env.SITEPILOT_GRANTS_DB) : new GrantStore();
   const quality = process.env.SITEPILOT_QA_PREVIEWS && process.env.SITEPILOT_QA_ARTIFACT_ROOT ? new QualityAdapter({ preview: new PlaywrightPreviewAdapter({ previews: JSON.parse(process.env.SITEPILOT_QA_PREVIEWS), artifactRoot: process.env.SITEPILOT_QA_ARTIFACT_ROOT }) }) : null;
-  createServer(store, {}, evidence, registry, codeAtlas, payload, quality, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }, grants).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
+  const payloadBuildSettings = [process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, process.env.SITEPILOT_WORKTREE_ROOT, process.env.SITEPILOT_SANDBOX_IMAGE];
+  const payloadBuild = payloadBuildSettings.every(Boolean) ? new PayloadBuildPipeline({ sourceRoot: process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT, image: process.env.SITEPILOT_SANDBOX_IMAGE }) : null;
+  createServer(store, {}, evidence, registry, codeAtlas, payload, quality, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }, grants, payloadBuild).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
 }

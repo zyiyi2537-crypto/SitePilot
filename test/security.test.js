@@ -151,7 +151,9 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   const plan = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
   assert.equal(plan.status, 200);
   assert.equal((await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: "missing" })).status, 422);
-  const grant = await request(server, "POST", `/runs/${run.id}/grants`, "b".repeat(32), { tool: "other_tool", resource: "/tmp/elsewhere", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const unknown = await request(server, "POST", `/runs/${run.id}/grants`, "b".repeat(32), { tool: "other_tool", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(unknown.status, 422);
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, "b".repeat(32), { tool: "generate_candidate", resource: "/tmp/elsewhere", expiresAt: new Date(Date.now() + 60_000).toISOString() });
   assert.equal(grant.status, 201);
   assert.equal(grant.body.tool, "generate_candidate");
   assert.equal(grant.body.resource, `${root}/${run.id}`);
@@ -161,6 +163,30 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
   assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
   await fs.rm(root, { recursive: true, force: true });
+});
+
+test("Payload worktree and build actions require scoped single-use L2 grants", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "website" });
+  const run = store.createRun(project.id);
+  const calls = [];
+  const root = "/tmp/sitepilot-payload-api-test";
+  const payloadBuild = { worktreeRoot: root, prepare: async (input) => { calls.push(["prepare", input]); return { baseCommit: "31ba7ee8271998ad7aa8963111764cbacf37b157", repositoryPathRef: `${project.id}/${run.id}/worktree`, worktreeId: "w1" }; }, build: async (input) => { calls.push(["build", input]); return { sourceCommit: "31ba7ee8271998ad7aa8963111764cbacf37b157", build: { reportHash: "hash" } }; } };
+  const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer" };
+  const server = createServer(store, auth, undefined, undefined, null, null, null, null, undefined, payloadBuild);
+  const prepareRoute = `/runs/${run.id}/payload-prepare`;
+  assert.equal((await request(server, "POST", prepareRoute, auth.apiToken, {})).status, 401);
+  assert.equal((await request(server, "POST", prepareRoute, auth.l2Token, { grantId: "missing" })).status, 422);
+  const prepareGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "prepare_payload_template", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(prepareGrant.status, 201);
+  assert.equal(prepareGrant.body.resource, `${root}/${project.id}/${run.id}`);
+  assert.equal((await request(server, "POST", prepareRoute, auth.l2Token, { grantId: prepareGrant.body.id })).status, 201);
+  assert.equal((await request(server, "POST", prepareRoute, auth.l2Token, { grantId: prepareGrant.body.id })).status, 409);
+  const buildGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_template", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(buildGrant.status, 201);
+  assert.equal((await request(server, "POST", `/runs/${run.id}/payload-build`, auth.l2Token, { grantId: buildGrant.body.id })).status, 200);
+  assert.equal((await request(server, "POST", `/runs/${run.id}/payload-build`, auth.l2Token, { grantId: buildGrant.body.id })).status, 422);
+  assert.deepEqual(calls.map(([name]) => name), ["prepare", "build"]);
 });
 
 test("evidence API records sources, citations and claims under the project", async () => {
