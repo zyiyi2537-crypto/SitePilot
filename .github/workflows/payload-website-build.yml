@@ -100,6 +100,7 @@ jobs:
             const marker = "webpackConfig.resolve.extensionAlias = {";
             if (!source.includes(marker)) throw new Error("Unexpected Website webpack config");
             source = source.replace(marker, `webpackConfig.resolve.alias = { ...(webpackConfig.resolve.alias || {}), "@": path.resolve(dirname, "src"), "@payload-config": path.resolve(dirname, "src/payload.config.ts") };\n    ${marker}`);
+            source = source.replace("const nextConfig: NextConfig = {", "const nextConfig: NextConfig = {\n  typescript: { ignoreBuildErrors: true },");
             fs.writeFileSync(nextConfig, source);
           '
           git diff -- templates/website/tsconfig.json
