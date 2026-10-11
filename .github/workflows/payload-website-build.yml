@@ -133,6 +133,7 @@ jobs:
           cp ci/payload-seed.ts payload-source/templates/website/sitepilot-seed.ts
           cp ci/payload-preview.ts payload-source/templates/website/sitepilot-preview.ts
           cp ci/payload-command.mjs payload-source/templates/website/sitepilot-command.mjs
+          cp ci/payload-typecheck.mjs payload-source/templates/website/sitepilot-typecheck.mjs
           password=$(openssl rand -hex 24)
           preview_secret=$(openssl rand -hex 24)
           echo "::add-mask::$password"
@@ -169,6 +170,11 @@ jobs:
             exit 1
           fi
           node sitepilot-command.mjs corepack pnpm exec tsx sitepilot-preview.ts
+      - name: Probe full website TypeScript validation
+        continue-on-error: true
+        working-directory: payload-source/templates/website
+        timeout-minutes: 8
+        run: node sitepilot-command.mjs corepack pnpm exec node sitepilot-typecheck.mjs
       - name: Upload synthetic draft acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -180,5 +186,6 @@ jobs:
             ci-results/draft-plan.json
             payload-source/templates/website/sitepilot-cms-receipt.json
             payload-source/templates/website/sitepilot-preview-report.json
+            payload-source/templates/website/sitepilot-typecheck-report.json
             payload-source/templates/website/sitepilot-desktop.png
             payload-source/templates/website/sitepilot-mobile.png
