@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises'
 import assert from 'node:assert/strict'
-import { chromium, expect } from '@playwright/test'
+import { chromium, expect, type APIResponse } from '@playwright/test'
 
 assert.equal(process.env.CI, '1')
 assert.ok(process.env.SITEPILOT_CI_PASSWORD)
@@ -28,14 +28,14 @@ try {
     ['mobile', { width: 375, height: 812 }],
   ] as const) {
     const context = await browser.newContext({ baseURL, viewport })
-    const login = await context.request.post('/api/users/login', { data: {
+    const login: APIResponse = await context.request.post('/api/users/login', { data: {
       email: 'sitepilot-ci@example.invalid', password: process.env.SITEPILOT_CI_PASSWORD,
     } })
     assert.equal(login.status(), 200)
     const page = await context.newPage()
     const errors: string[] = []
     page.on('pageerror', error => errors.push(error.message))
-    const preview = await context.request.get(`/next/preview?path=/sitepilot-ci&previewSecret=${encodeURIComponent(process.env.PREVIEW_SECRET!)}`, { maxRedirects: 0 })
+    const preview: APIResponse = await context.request.get(`/next/preview?path=/sitepilot-ci&previewSecret=${encodeURIComponent(process.env.PREVIEW_SECRET!)}`, { maxRedirects: 0 })
     assert.equal(preview.status(), 307)
     const response = await page.goto(`${baseURL}/sitepilot-ci`)
     assert.equal(response?.status(), 200)
