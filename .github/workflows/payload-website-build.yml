@@ -175,8 +175,7 @@ jobs:
         working-directory: payload-source/templates/website
         timeout-minutes: 8
         run: node sitepilot-command.mjs corepack pnpm exec node sitepilot-typecheck.mjs
-      - name: Probe production route generation
-        continue-on-error: true
+      - name: Generate production routes
         working-directory: payload-source/templates/website
         timeout-minutes: 8
         run: node sitepilot-command.mjs corepack pnpm exec next build --webpack --experimental-build-mode generate

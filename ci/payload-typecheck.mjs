@@ -41,7 +41,7 @@ const report = {
 fs.writeFileSync('sitepilot-typecheck-report.json', `${JSON.stringify(report, null, 2)}\n`);
 console.log(`Checked ${report.files} files with ${report.tool}: ${report.diagnosticCount} diagnostics; ${JSON.stringify(groups)}`);
 for (const diagnostic of report.diagnostics.filter((item) => item.category === 'website').slice(0, 20)) {
-  console.log(`${diagnostic.file}:${diagnostic.line || 0} TS${diagnostic.code} ${diagnostic.message}`);
+  console.log(`${diagnostic.file}:${diagnostic.line || 0} TS${diagnostic.code} ${diagnostic.message.slice(0, 240)}`);
 }
 for (const diagnostic of report.diagnostics.filter((item) => item.category === 'configuration').slice(0, 5)) console.log(`tsconfig: TS${diagnostic.code} ${diagnostic.message}`);
 if (diagnostics.length) process.exitCode = 1;
