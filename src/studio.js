@@ -3,6 +3,9 @@ const node = (tag, text, className) => { const item = document.createElement(tag
 let projectId = null;
 let runId = null;
 let designDraft = null;
+let currentRun = null;
+let currentCandidate = null;
+let currentPreview = null;
 
 function notice(message, error = false) {
   const target = $("#notice");
@@ -10,9 +13,10 @@ function notice(message, error = false) {
   target.classList.toggle("error", error);
 }
 
-async function api(method, route, body, reviewer = false) {
-  const token = $(reviewer ? "#review-token" : "#api-token").value.trim();
-  if (!token) throw new Error(reviewer ? "需要审核凭据" : "需要 API 凭据");
+async function api(method, route, body, credential = "api") {
+  const selector = credential === "reviewer" ? "#review-token" : credential === "l2" ? "#l2-token" : "#api-token";
+  const token = $(selector).value.trim();
+  if (!token) throw new Error(credential === "reviewer" ? "需要审核凭据" : credential === "l2" ? "需要 L2 执行凭据" : "需要 API 凭据");
   const response = await fetch(route, { method, headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, body: body === undefined ? undefined : JSON.stringify(body), cache: "no-store" });
   const result = await response.json();
   if (!response.ok) throw new Error(result.message || result.code || `HTTP ${response.status}`);
@@ -51,8 +55,12 @@ async function showRun() {
   target.replaceChildren();
   if (!runId) { target.textContent = "此项目尚无 Run。"; return; }
   const run = await api("GET", `/runs/${encodeURIComponent(runId)}`);
+  currentRun = run;
   const designResult = await api("GET", `/runs/${encodeURIComponent(runId)}/design-drafts`);
   designDraft = designResult.designs.at(-1) || null;
+  const { candidates } = await api("GET", "/candidates");
+  currentCandidate = run.candidateIds?.length ? candidates.find((candidate) => candidate.id === run.candidateIds.at(-1)) || null : null;
+  currentPreview = null;
   const details = node("dl");
   for (const [label, value] of [["Run", run.id], ["状态", run.checkpoint], ["策略", run.strategy?.strategy || "待生成"], ["页面", (run.strategy?.pageHierarchy || []).join(", ")]]) {
     details.append(node("dt", label), node("dd", value));
@@ -83,6 +91,36 @@ async function showRun() {
   if (run.pagePlan) $("#plan-output").textContent = JSON.stringify({ routes: run.pagePlan.routes.map(({ route, file, components }) => ({ route, file, components: components.map(({ name }) => name) })), sourceManifestHash: run.pagePlan.sourceManifestHash }, null, 2);
   $("#create-design").disabled = !run.pagePlan;
   renderDesignDraft();
+  renderDelivery();
+}
+
+function renderDelivery(result) {
+  const status = $("#delivery-status");
+  const output = $("#delivery-output");
+  if (result !== undefined) {
+    output.hidden = false;
+    const view = result?.candidate ? { ...result, candidate: {
+      id: result.candidate.id,
+      parentId: result.candidate.parentId,
+      status: result.candidate.status,
+      candidateHash: result.candidate.candidateHash,
+      designDraftId: result.candidate.designDraftId,
+      designHash: result.candidate.revision?.designHash || null,
+      cmsSnapshotId: result.candidate.cmsSnapshot?.cmsSnapshotId || null,
+      buildPassed: Boolean(result.candidate.build?.passed),
+      qaPassed: Boolean(result.candidate.quality?.passed),
+    } } : result;
+    if (view?.generated) delete view.generated;
+    output.textContent = JSON.stringify(view, null, 2);
+  }
+  const hasPlan = Boolean(currentRun?.pagePlan && designDraft);
+  const alreadyGenerated = currentRun?.candidateIds?.some((id) => currentCandidate?.id === id && currentCandidate.designDraftId === designDraft?.id);
+  $("#create-candidate").disabled = !hasPlan || Boolean(alreadyGenerated);
+  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
+  $("#start-preview").disabled = !currentCandidate?.build?.passed;
+  $("#run-qa").disabled = !currentCandidate || !currentPreview;
+  if (!currentCandidate) status.textContent = hasPlan ? "设计已就绪，可以生成代码候选。" : "需要先生成页面计划和设计草稿。";
+  else status.textContent = `候选 ${currentCandidate.id} · ${currentCandidate.cmsSnapshot ? "含 Payload 草稿" : "代码候选"} · QA ${currentCandidate.quality?.passed ? "通过" : "待运行"}`;
 }
 
 function renderDesignDraft() {
@@ -123,7 +161,7 @@ async function loadReviews() {
     const license = checkbox("已核对上游许可证与文件来源"); const tests = checkbox("已运行或查验证据所列测试");
     const notes = node("textarea"); notes.placeholder = "填写许可证和测试证据位置"; notes.required = true;
     const approve = node("button", "批准组件", "primary"); approve.type = "button";
-    approve.onclick = () => action(async () => { if (!license.input.checked || !tests.input.checked || !notes.value.trim()) throw new Error("请逐项核对并填写证据位置"); await api("POST", `/components/${encodeURIComponent(block.id)}/review`, { approved: true, licenseVerified: true, testsPassed: true, notes: notes.value.trim() }, true); await loadReviews(); });
+    approve.onclick = () => action(async () => { if (!license.input.checked || !tests.input.checked || !notes.value.trim()) throw new Error("请逐项核对并填写证据位置"); await api("POST", `/components/${encodeURIComponent(block.id)}/review`, { approved: true, licenseVerified: true, testsPassed: true, notes: notes.value.trim() }, "reviewer"); await loadReviews(); });
     item.append(license.label, tests.label, notes, approve); components.append(item);
   }
   if (!components.children.length) components.append(node("p", "暂无待审核组件", "muted"));
@@ -133,7 +171,7 @@ async function loadReviews() {
     item.append(node("h3", candidate.id), node("p", `状态：${candidate.status} · QA：${candidate.quality?.passed ? "通过" : "未通过"}`), node("code", candidate.candidateHash));
     if (candidate.quality?.passed && !candidate.review) {
       const decision = checkbox("已核对候选、QA 报告和来源"); const notes = node("textarea"); notes.placeholder = "审核意见"; const approve = node("button", "提交审核", "primary"); approve.type = "button";
-      approve.onclick = () => action(async () => { if (!decision.input.checked || !notes.value.trim()) throw new Error("请核对候选并填写审核意见"); await api("POST", `/candidates/${encodeURIComponent(candidate.id)}/review`, { approved: true, notes: notes.value.trim() }, true); await loadReviews(); });
+      approve.onclick = () => action(async () => { if (!decision.input.checked || !notes.value.trim()) throw new Error("请核对候选并填写审核意见"); await api("POST", `/candidates/${encodeURIComponent(candidate.id)}/review`, { approved: true, notes: notes.value.trim() }, "reviewer"); await loadReviews(); });
       item.append(decision.label, notes, approve);
     }
     list.append(item);
@@ -143,9 +181,10 @@ async function loadReviews() {
 
 $("#connect").onclick = () => action(async () => { await loadProjects(); if (!$("#review-view").hidden) await loadReviews(); });
 $("#review-token-field").style.display = "none";
+$("#l2-token-field").style.display = "none";
 $("#refresh").onclick = () => action(loadProjects);
-$("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
-$("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
+$("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
+$("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
 $("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => { const form = new FormData(event.target); const input = Object.fromEntries(form); input.contentAvailable = input.contentAvailable.split(",").map((value) => value.trim()).filter(Boolean); const project = await api("POST", "/projects", input); projectId = project.id; const run = await api("POST", `/projects/${encodeURIComponent(project.id)}/runs`, {}); runId = run.id; await loadProjects(); event.target.reset(); }); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };
 $("#create-plan").onclick = () => action(async () => { if (!runId) throw new Error("请先选择项目 Run"); await api("POST", `/runs/${encodeURIComponent(runId)}/page-plan`, {}); await showRun(); });
@@ -166,3 +205,48 @@ $("#feedback-form").onsubmit = (event) => { event.preventDefault(); action(async
   $("#design-feedback").value = "";
   await showRun();
 }); };
+$("#create-candidate").onclick = () => action(async () => {
+  if (!runId || !designDraft) throw new Error("请先生成页面计划和设计草稿");
+  if (!$("#review-token").value.trim() || !$("#l2-token").value.trim()) {
+    $("#review-token-field").style.display = "grid";
+    $("#l2-token-field").style.display = "grid";
+    throw new Error("填写审核与 L2 执行凭据后，再生成候选");
+  }
+  const grant = await api("POST", "/runs/" + encodeURIComponent(runId) + "/grants", { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() }, "reviewer");
+  const result = await api("POST", "/runs/" + encodeURIComponent(runId) + "/generate", { grantId: grant.id }, "l2");
+  currentCandidate = result.candidate;
+  currentPreview = null;
+  await showRun();
+  renderDelivery({ candidate: result.candidate, build: result.build });
+});
+$("#create-payload").onclick = () => action(async () => {
+  if (!currentCandidate) throw new Error("请先生成候选");
+  let contentByPage;
+  try { contentByPage = JSON.parse($("#payload-content").value); } catch { throw new Error("客户内容必须是 JSON 对象"); }
+  if (!contentByPage || typeof contentByPage !== "object" || Array.isArray(contentByPage)) throw new Error("客户内容必须是 JSON 对象");
+  const receipt = await api("POST", "/candidates/" + encodeURIComponent(currentCandidate.id) + "/payload-draft", {
+    expectedCmsSnapshot: $("#payload-snapshot").value.trim(),
+    idempotencyKey: $("#payload-idempotency").value.trim(),
+    contentByPage,
+  });
+  currentCandidate = receipt.candidate;
+  currentPreview = null;
+  await showRun();
+  renderDelivery(receipt);
+});
+$("#start-preview").onclick = () => action(async () => {
+  if (!currentCandidate) throw new Error("请先生成候选");
+  currentPreview = await api("POST", "/candidates/" + encodeURIComponent(currentCandidate.id) + "/preview", {});
+  $("#qa-preview-id").value = currentPreview.sessionId;
+  renderDelivery({ candidate: currentCandidate, preview: currentPreview, previewType: "local-read-only" });
+});
+$("#run-qa").onclick = () => action(async () => {
+  if (!currentCandidate || !currentPreview) throw new Error("请先启动该候选的本地预览");
+  const report = await api("POST", "/candidates/" + encodeURIComponent(currentCandidate.id) + "/qa", {
+    qaPreviewId: $("#qa-preview-id").value.trim() || currentPreview.sessionId,
+    routes: currentRun?.pagePlan?.routes.map((route) => route.route) || ["/"],
+    locales: currentRun?.inputSnapshot?.locale || ["en"],
+  });
+  currentCandidate.quality = { passed: report.passed, reportHash: report.reportHash, candidateHash: report.candidateHash };
+  renderDelivery({ candidate: currentCandidate, preview: currentPreview, qa: report, previewType: "local-read-only" });
+});

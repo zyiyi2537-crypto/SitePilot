@@ -8,7 +8,7 @@ import { BlockRegistry, JsonBlockRegistry, SqliteBlockRegistry } from "./registr
 import { researchComponents } from "./research-agent.js";
 import { composePagePlan } from "./page-composer.js";
 import { createCodeAtlasAdapterFromEnvironment } from "./codeatlas.js";
-import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "./payload-adapter.js";
+import { PayloadHttpSandboxBackend, PayloadSandboxAdapter, computePayloadRequestHash } from "./payload-adapter.js";
 import { WorktreePolicy } from "./core.js";
 import { materializePagePlan } from "./code-generator.js";
 import { validateGeneratedCandidate } from "./local-build.js";
@@ -53,8 +53,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
-      if (req.method === "GET" && ["/studio", "/studio.css", "/studio.js"].includes(url.pathname)) {
-        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio.js": "studio.js" }[url.pathname];
+      if (req.method === "GET" && ["/studio", "/studio.css", "/studio-delivery.css", "/studio.js"].includes(url.pathname)) {
+        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio-delivery.css": "studio-delivery.css", "/studio.js": "studio.js" }[url.pathname];
         const type = file.endsWith("html") ? "text/html" : file.endsWith("css") ? "text/css" : "text/javascript";
         const content = await fs.readFile(new URL(`./${file}`, import.meta.url));
         res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'", "cache-control": "no-store", "x-content-type-options": "nosniff" });
@@ -102,7 +102,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const sessionId = `preview_${crypto.randomUUID().replaceAll("-", "")}`;
         const expiresAt = Date.now() + previewTtlMs;
         const publicSession = Object.freeze({ sessionId, candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: candidate.designDraftId || null, designHash: manifest.design?.designHash || null, baseUrl: `http://${address.host}:${address.port}/`, expiresAt: new Date(expiresAt).toISOString(), localOnly: true, writesAllowed: false });
-        const timer = setTimeout(() => { const session = previewSessions.get(sessionId); previewSessions.delete(sessionId); session?.preview.close().catch(() => {}); }, previewTtlMs);
+        try { quality?.preview?.registerPreview?.({ id: sessionId, baseUrl: publicSession.baseUrl, candidateHash: candidate.candidateHash, expiresAt }); }
+        catch (error) { await preview.close(); throw error; }
+        const timer = setTimeout(() => { const session = previewSessions.get(sessionId); previewSessions.delete(sessionId); quality?.preview?.unregisterPreview?.(sessionId); session?.preview.close().catch(() => {}); }, previewTtlMs);
         timer.unref?.();
         previewSessions.set(sessionId, { sessionId, candidateId: candidate.id, expiresAt, preview, public: publicSession, timer });
         store.event(candidate.runId, "candidate.preview.created", { candidateId: candidate.id, sessionId, expiresAt: publicSession.expiresAt });
@@ -113,6 +115,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!session) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         previewSessions.delete(session.sessionId);
         clearTimeout(session.timer);
+        quality?.preview?.unregisterPreview?.(session.sessionId);
         await session.preview.close();
         return send(res, 200, { sessionId: session.sessionId, closed: true });
       }
@@ -334,8 +337,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           sourceResolver: (source) => codeAtlas.getCompleteFile({ ...source, expectedCommit: source.commit }),
         });
         const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
-        const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, sourceRefs: run.research?.evidence || [] });
-        candidate.build = build;
+        const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, build, sourceRefs: run.research?.evidence || [] });
         run.checkpoint = "candidate_ready";
         store.persist?.();
         return send(res, 201, { candidate, generated, build });
@@ -355,30 +357,79 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!payload || typeof payload.createDraft !== "function") return send(res, 503, { code: "PAYLOAD_NOT_CONFIGURED" });
         const candidate = store.candidates.get(payloadMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
-        if (!candidate.quality?.passed) return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
         const input = await readJson(req);
+        const run = store.runs.get(candidate.runId);
         const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
         if (candidate.designDraftId && !design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+        const autoPlan = input.contentByPage !== undefined || input.usePayloadPlan === true || input.pageOperations === undefined;
+        let plan = null;
+        let pageOperations = input.pageOperations;
+        if (autoPlan) {
+          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!run?.strategy) return send(res, 422, { code: "STRATEGY_REQUIRED" });
+          plan = createPayloadDraftPlan({
+            strategy: run.strategy,
+            projectId: run.projectId,
+            locales: input.locales || run.inputSnapshot.locale,
+            contentByPage: input.contentByPage,
+          });
+          pageOperations = plan.operations;
+        } else if (!candidate.quality?.passed) {
+          // Keep the legacy explicit-operation path behind the existing QA gate.
+          return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
+        }
+        const expectedRequestHash = computePayloadRequestHash({
+          candidateId: candidate.id,
+          candidateHash: candidate.candidateHash,
+          expectedCmsSnapshot: input.expectedCmsSnapshot,
+          pageOperations,
+          environment: "sandbox",
+          designDraftId: design?.id || null,
+          designHash: design?.designHash || null,
+        });
+        const priorForKey = [...store.candidates.values()].find((item) => item.parentId === candidate.id && item.cmsSnapshot?.idempotencyKey === input.idempotencyKey);
+        if (priorForKey) {
+          if (priorForKey.cmsSnapshot.requestHash !== expectedRequestHash) throw new PolicyError("Idempotency key was reused with different input", "IDEMPOTENCY_CONFLICT");
+          return send(res, 200, { ...priorForKey.cmsSnapshot, candidate: priorForKey, ...(autoPlan ? { plan } : {}), parentCandidateId: candidate.id });
+        }
         const receipt = await payload.createDraft({
           ...input,
+          pageOperations,
           candidateId: candidate.id,
+          candidateHash: candidate.candidateHash,
           designDraftId: design?.id || null,
           designHash: design?.designHash || null,
           environment: "sandbox",
         });
+        if (!receipt || receipt.candidateId !== candidate.id || receipt.status !== "sandbox_draft") {
+          throw new PolicyError("Payload snapshot receipt is not bound to this sandbox candidate", "CMS_INVALID_RECEIPT");
+        }
+        if (receipt.candidateHash !== candidate.candidateHash) {
+          throw new PolicyError("Payload snapshot receipt is not bound to this candidate hash", "STALE_REVISION");
+        }
+        if (receipt.requestHash !== expectedRequestHash) {
+          throw new PolicyError("Payload snapshot receipt does not match the submitted draft plan", "STALE_REVISION");
+        }
         if (design && (receipt?.designDraftId !== design.id || receipt?.designHash !== design.designHash)) {
           throw new PolicyError("Payload snapshot did not preserve the bound design revision", "STALE_REVISION");
         }
-        candidate.cmsSnapshot = receipt;
-        store.event(candidate.runId, "payload.draft.created", { candidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
-        return send(res, 201, receipt);
+        const existing = receipt.requestHash ? [...store.candidates.values()].find((item) => item.parentId === candidate.id && item.cmsSnapshot?.requestHash === receipt.requestHash) : null;
+        const revision = existing || store.createPayloadCandidate(candidate.id, receipt);
+        run.checkpoint = "cms_candidate_ready";
+        store.persist?.();
+        store.event(candidate.runId, "payload.draft.created", { candidateId: revision.id, parentCandidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
+        return send(res, existing ? 200 : 201, { ...receipt, candidate: revision, ...(autoPlan ? { plan } : {}), parentCandidateId: candidate.id });
       }
       const qaMatch = url.pathname.match(/^\/candidates\/([^/]+)\/qa$/);
       if (req.method === "POST" && qaMatch) {
         if (!quality || typeof quality.run !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
         const candidate = store.candidates.get(qaMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (candidate.cmsSnapshot && !candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const report = await quality.run({ ...(await readJson(req)), candidateId: candidate.id, candidateHash: candidate.candidateHash });
+        if (report.candidateId !== candidate.id || report.candidateHash !== candidate.candidateHash) {
+          throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
+        }
         store.markQuality(candidate.id, { passed: report.passed, reportHash: report.reportHash, checks: report.results });
         return send(res, 200, report);
       }
@@ -400,13 +451,14 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });
   server.on("close", () => {
     for (const session of previewSessions.values()) {
       clearTimeout(session.timer);
+      quality?.preview?.unregisterPreview?.(session.sessionId);
       session.preview.close().catch(() => {});
     }
     previewSessions.clear();

@@ -22,11 +22,11 @@ export class PayloadHttpSandboxBackend {
     this.allowedCollections = new Set(allowedCollections);
   }
 
-  async apply({ candidateId, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash }) {
+  async apply({ candidateId, candidateHash, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash }) {
     const records = [];
-    for (const operation of operations) {
+    for (const [operationIndex, operation] of operations.entries()) {
       if (!this.allowedCollections.has(operation.collection)) throw new PolicyError(`Payload collection is not allowed: ${operation.collection}`, "POLICY_DENIED");
-      const body = { ...operation.data, _sitepilotCandidateId: candidateId, _sitepilotRequestHash: requestHash };
+      const body = { ...operation.data, _sitepilotCandidateId: candidateId, _sitepilotCandidateHash: candidateHash, _sitepilotRequestHash: requestHash };
       const endpoint = `${this.baseUrl}/api/${encodeURIComponent(operation.collection)}`;
       const headers = {
         authorization: `Bearer ${this.token}`,
@@ -35,6 +35,8 @@ export class PayloadHttpSandboxBackend {
       };
       if (designDraftId) headers["x-sitepilot-design-draft"] = designDraftId;
       if (designHash) headers["x-sitepilot-design-hash"] = designHash;
+      if (candidateHash) headers["x-sitepilot-candidate-hash"] = candidateHash;
+      headers["idempotency-key"] = `${requestHash}:${operationIndex}`;
       const response = await this.fetch(endpoint, {
         method: "POST",
         headers,
@@ -53,45 +55,63 @@ function hash(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+export function computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], environment = "sandbox", designDraftId, designHash } = {}) {
+  return hash({ candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, pageOperations, environment, designDraftId: designDraftId || null, designHash: designHash || null });
+}
+
 export class PayloadSandboxAdapter {
   constructor({ backend, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
     if (!backend || typeof backend.apply !== "function") throw new PolicyError("Payload sandbox backend is required", "CONFIG_REQUIRED");
     this.backend = backend;
     this.allowedCollections = new Set(allowedCollections);
     this.receipts = new Map();
+    this.pending = new Map();
   }
 
-  async createDraft({ candidateId, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash } = {}) {
+  async createDraft({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash } = {}) {
     if (!candidateId || !expectedCmsSnapshot) throw new PolicyError("candidate_id and expected CMS snapshot are required", "INVALID_INPUT");
     if (!idempotencyKey || typeof idempotencyKey !== "string") throw new PolicyError("idempotency_key is required", "INVALID_INPUT");
     if (environment !== "sandbox") throw new PolicyError("Payload writes are limited to the sandbox environment", "POLICY_DENIED");
     if ((designDraftId && !designHash) || (!designDraftId && designHash)) throw new PolicyError("designDraftId and designHash must be provided together", "INVALID_INPUT");
     if (designDraftId !== undefined && (typeof designDraftId !== "string" || !designDraftId || designDraftId.length > 128)) throw new PolicyError("designDraftId is invalid", "INVALID_INPUT");
     if (designHash !== undefined && (typeof designHash !== "string" || !/^[a-f0-9]{64}$/i.test(designHash))) throw new PolicyError("designHash is invalid", "INVALID_INPUT");
-    const requestHash = hash({ candidateId, expectedCmsSnapshot, pageOperations, environment, designDraftId: designDraftId || null, designHash: designHash || null });
+    if (candidateHash !== undefined && (typeof candidateHash !== "string" || !/^[a-f0-9]{64}$/i.test(candidateHash))) throw new PolicyError("candidateHash is invalid", "INVALID_INPUT");
+    const requestHash = computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations, environment, designDraftId, designHash });
     const previous = this.receipts.get(idempotencyKey);
     if (previous) {
       if (previous.requestHash !== requestHash) throw new PolicyError("Idempotency key was reused with different input", "IDEMPOTENCY_CONFLICT");
       return previous.receipt;
     }
+    const pending = this.pending.get(idempotencyKey);
+    if (pending) {
+      if (pending.requestHash !== requestHash) throw new PolicyError("Idempotency key was reused with different input", "IDEMPOTENCY_CONFLICT");
+      return pending.promise;
+    }
     this.validateOperations(pageOperations);
-    const intent = { candidateId, expectedCmsSnapshot, operations: pageOperations, requestHash, designDraftId: designDraftId || null, designHash: designHash || null };
-    const result = await this.backend.apply(intent);
-    if (!result || typeof result.snapshotId !== "string") throw new PolicyError("Payload backend returned no snapshot receipt", "UNKNOWN_RESULT");
-    const receipt = Object.freeze({
-      candidateId,
-      designDraftId: designDraftId || null,
-      designHash: designHash || null,
-      cmsSnapshotId: result.snapshotId,
-      cmsRecordRefs: result.recordRefs || [],
-      diff: result.diff || [],
-      requestHash,
-      status: "sandbox_draft",
-      promotesDeliveryPreview: false,
-      createsDraftVersion: false,
-    });
-    this.receipts.set(idempotencyKey, { requestHash, receipt });
-    return receipt;
+    const intent = { candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, operations: pageOperations, requestHash, designDraftId: designDraftId || null, designHash: designHash || null };
+    const promise = (async () => {
+      const result = await this.backend.apply(intent);
+      if (!result || typeof result.snapshotId !== "string") throw new PolicyError("Payload backend returned no snapshot receipt", "UNKNOWN_RESULT");
+      const receipt = Object.freeze({
+        candidateId,
+        candidateHash: candidateHash || null,
+        designDraftId: designDraftId || null,
+        designHash: designHash || null,
+        cmsSnapshotId: result.snapshotId,
+        idempotencyKey,
+        cmsRecordRefs: result.recordRefs || [],
+        diff: result.diff || [],
+        requestHash,
+        status: "sandbox_draft",
+        promotesDeliveryPreview: false,
+        createsDraftVersion: false,
+      });
+      this.receipts.set(idempotencyKey, { requestHash, receipt });
+      return receipt;
+    })();
+    this.pending.set(idempotencyKey, { requestHash, promise });
+    try { return await promise; }
+    finally { if (this.pending.get(idempotencyKey)?.promise === promise) this.pending.delete(idempotencyKey); }
   }
 
   validateOperations(operations) {

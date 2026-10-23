@@ -22,6 +22,7 @@ export class PlaywrightPreviewAdapter {
   async inspect({ qaPreviewId, candidateHash, routes, locales, viewports, testMode }) {
     const preview = this.previews.get(qaPreviewId);
     if (!preview) throw new PolicyError("QA preview ID is not registered", "RESOURCE_NOT_FOUND");
+    if (preview.expiresAt && preview.expiresAt <= Date.now()) throw new PolicyError("QA preview session has expired", "RESOURCE_NOT_FOUND");
     if (preview.candidateHash !== candidateHash) throw new PolicyError("QA preview does not match candidate", "STALE_REVISION");
     const baseUrl = preview.baseUrl;
     if (testMode !== "read-only") throw new PolicyError("Browser QA only supports read-only mode", "POLICY_DENIED");
@@ -77,5 +78,21 @@ export class PlaywrightPreviewAdapter {
       seo: { passed: all((item) => item.state.title && item.state.description && item.state.heading), details: "Title, description and H1" },
     };
     return { checks, observations };
+  }
+
+  registerPreview({ id, baseUrl, candidateHash, expiresAt } = {}) {
+    if (!id || typeof id !== "string" || id.length > 128 || !candidateHash || typeof candidateHash !== "string" || !Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      throw new PolicyError("QA preview registration is invalid", "INVALID_INPUT");
+    }
+    const url = new URL(baseUrl);
+    if (url.protocol !== "http:" || !LOCAL_HOSTS.has(url.hostname) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) {
+      throw new PolicyError("QA previews must be fixed localhost HTTP origins", "POLICY_DENIED");
+    }
+    this.previews.set(id, Object.freeze({ baseUrl: url.href, candidateHash, expiresAt }));
+    return id;
+  }
+
+  unregisterPreview(id) {
+    return this.previews.delete(id);
   }
 }

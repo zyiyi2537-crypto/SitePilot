@@ -297,12 +297,29 @@ export class SitePilotStore {
       if (!design || design.runId !== runId) throw new PolicyError("Candidate design draft does not belong to run", "POLICY_DENIED");
     }
     const designDraftId = input.designDraftId || run.designDraftId || null;
+    const design = designDraftId ? this.designs.get(designDraftId) : null;
+    const codeArtifact = input.codeArtifact ? deepFreeze(clone(input.codeArtifact)) : null;
+    const cmsSnapshot = input.cmsSnapshot ? deepFreeze(clone(input.cmsSnapshot)) : null;
+    const build = input.build ? deepFreeze(clone(input.build)) : null;
+    const sourceRefs = deepFreeze(clone(input.sourceRefs || []));
+    const parentId = input.parentId || null;
+    const boundDesignHash = design?.designHash || codeArtifact?.designHash || null;
+    const candidateHash = hash({ parentId, designDraftId, designHash: boundDesignHash, codeArtifact, build, cmsSnapshot, sourceRefs });
     const candidate = {
-      id: id("candidate"), runId, status: "candidate", parentId: input.parentId || null,
+      id: id("candidate"), runId, status: "candidate", parentId,
       designDraftId,
-      codeArtifact: input.codeArtifact || null, cmsSnapshot: input.cmsSnapshot || null,
-      sourceRefs: input.sourceRefs || [], quality: null, review: null,
-      candidateHash: hash({ ...input, designDraftId }), createdAt: new Date().toISOString()
+      codeArtifact, cmsSnapshot, build,
+      sourceRefs, quality: null, review: null,
+      candidateHash,
+      revision: Object.freeze({
+        parentCandidateId: parentId,
+        codeArtifact,
+        designDraftId,
+        designHash: boundDesignHash,
+        cmsSnapshotId: cmsSnapshot?.cmsSnapshotId || null,
+        buildHash: build ? hash(build) : null,
+      }),
+      createdAt: new Date().toISOString()
     };
     this.candidates.set(candidate.id, candidate);
     run.candidateIds.push(candidate.id);
@@ -310,9 +327,39 @@ export class SitePilotStore {
     return candidate;
   }
 
+  createPayloadCandidate(parentId, cmsSnapshot) {
+    const parent = this.candidates.get(parentId);
+    if (!parent) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
+    if (!cmsSnapshot || typeof cmsSnapshot !== "object" || typeof cmsSnapshot.cmsSnapshotId !== "string") {
+      throw new PolicyError("A valid CMS snapshot receipt is required", "CMS_INVALID_RECEIPT");
+    }
+    if (cmsSnapshot.candidateId !== parent.id) {
+      throw new PolicyError("CMS snapshot is bound to another candidate", "STALE_REVISION");
+    }
+    if (cmsSnapshot.candidateHash !== parent.candidateHash) {
+      throw new PolicyError("CMS snapshot is bound to another candidate hash", "STALE_REVISION");
+    }
+    const revision = this.createCandidate(parent.runId, {
+      parentId: parent.id,
+      designDraftId: parent.designDraftId,
+      codeArtifact: parent.codeArtifact,
+      build: parent.build,
+      cmsSnapshot,
+      sourceRefs: parent.sourceRefs,
+    });
+    parent.status = "superseded";
+    this.event(parent.runId, "candidate.cms-revision.created", {
+      parentCandidateId: parent.id,
+      candidateId: revision.id,
+      cmsSnapshotId: cmsSnapshot.cmsSnapshotId,
+    });
+    return revision;
+  }
+
   markQuality(candidateId, quality) {
     const candidate = this.candidates.get(candidateId);
     if (!candidate) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
+    if (quality.candidateHash && quality.candidateHash !== candidate.candidateHash) throw new PolicyError("Quality result belongs to a stale candidate revision", "STALE_REVISION");
     candidate.quality = Object.freeze({ ...quality, candidateHash: candidate.candidateHash });
     candidate.status = quality.passed ? "quality_passed" : "quality_failed";
     return candidate;

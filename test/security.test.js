@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import fs from "node:fs/promises";
 
@@ -8,6 +9,8 @@ import { createServer } from "../src/server.js";
 import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
 import { PlaywrightPreviewAdapter } from "../src/playwright-preview.js";
+import { QualityAdapter } from "../src/quality-adapter.js";
+import { computePayloadRequestHash } from "../src/payload-adapter.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 import { BlockRegistry } from "../src/registry.js";
@@ -26,6 +29,10 @@ function request(server, method, url, token, body) {
     server.emit("request", req, res);
     req.on("error", reject);
   });
+}
+
+function createHashForTest(value) {
+  return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 test("HTTP API rejects anonymous writes and exposes no quality decision route", async () => {
@@ -109,7 +116,7 @@ test("Payload API only creates sandbox drafts after quality gates", async () => 
   const store = new SitePilotStore();
   const token = "a".repeat(32);
   const calls = [];
-  const payload = { createDraft: async (input) => { calls.push(input); return { candidateId: input.candidateId, designDraftId: input.designDraftId, designHash: input.designHash, cmsSnapshotId: "payload_1", status: "sandbox_draft" }; } };
+  const payload = { createDraft: async (input) => { calls.push(input); return { candidateId: input.candidateId, candidateHash: input.candidateHash, designDraftId: input.designDraftId, designHash: input.designHash, cmsSnapshotId: "payload_1", idempotencyKey: input.idempotencyKey, requestHash: computePayloadRequestHash(input), status: "sandbox_draft" }; } };
   const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, payload);
   const project = store.createProject({ goal: "website" });
   const run = store.createRun(project.id);
@@ -125,10 +132,90 @@ test("Payload API only creates sandbox drafts after quality gates", async () => 
   assert.equal(calls[0].designHash, design.designHash);
   assert.equal(result.body.designDraftId, design.id);
   assert.equal(result.body.designHash, design.designHash);
+  assert.equal(result.body.candidate.cmsSnapshot.cmsSnapshotId, "payload_1");
+  assert.equal(candidate.cmsSnapshot, null);
   const badServer = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, { createDraft: async () => ({ cmsSnapshotId: "payload_bad" }) });
   const mismatch = await request(badServer, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "bad", pageOperations: [] });
   assert.equal(mismatch.status, 422);
-  assert.equal(store.candidates.get(candidate.id).cmsSnapshot.cmsSnapshotId, "payload_1");
+  assert.equal(store.candidates.get(candidate.id).cmsSnapshot, null);
+});
+
+test("Payload create flow seals a CMS child candidate before QA", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const payloadCalls = [];
+  const payload = { createDraft: async (input) => {
+    payloadCalls.push(input);
+    return {
+      candidateId: input.candidateId,
+      candidateHash: input.candidateHash,
+      designDraftId: input.designDraftId,
+      designHash: input.designHash,
+      cmsSnapshotId: "cms_snapshot_1",
+      idempotencyKey: input.idempotencyKey,
+      requestHash: computePayloadRequestHash(input),
+      status: "sandbox_draft",
+      createsDraftVersion: false,
+      promotesDeliveryPreview: false,
+    };
+  } };
+  const qaCalls = [];
+  const quality = { run: async (input) => {
+    qaCalls.push(input);
+    return { candidateId: input.candidateId, candidateHash: input.candidateHash, passed: true, reportHash: "qa_report_1", results: [{ check: "links", passed: true }] };
+  } };
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, payload, quality);
+  const project = store.createProject({ goal: "Build a product site", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero", "Content"], locales: ["en"] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const parent = store.createCandidate(run.id, { designDraftId: design.id, codeArtifact: { head: "abc", designHash: design.designHash }, build: { passed: true, reportHash: "build_report_1" } });
+
+  const missingBuildCandidate = store.createCandidate(run.id, { designDraftId: design.id, codeArtifact: { head: "no-build" } });
+  const blocked = await request(server, "POST", `/candidates/${missingBuildCandidate.id}/payload-draft`, token, { contentByPage: {} });
+  assert.equal(blocked.status, 422);
+  assert.equal(blocked.body.code, "BUILD_GATE_REQUIRED");
+
+  const draft = await request(server, "POST", `/candidates/${parent.id}/payload-draft`, token, {
+    expectedCmsSnapshot: "cms_0",
+    idempotencyKey: "draft_home_1",
+    contentByPage: { home: { title: "Home", heroTitle: "Build with evidence", description: "Approved copy", claimRefs: ["claim_home"] } },
+  });
+  assert.equal(draft.status, 201);
+  assert.equal(draft.body.candidate.parentId, parent.id);
+  assert.equal(draft.body.candidate.cmsSnapshot.cmsSnapshotId, "cms_snapshot_1");
+  assert.equal(draft.body.candidate.revision.designHash, design.designHash);
+  assert.equal(draft.body.candidate.revision.cmsSnapshotId, "cms_snapshot_1");
+  assert.equal(draft.body.candidate.revision.buildHash, createHashForTest(parent.build));
+  assert.notEqual(draft.body.candidate.candidateHash, parent.candidateHash);
+  assert.equal(parent.cmsSnapshot, null);
+  assert.equal(parent.status, "superseded");
+  assert.equal(payloadCalls[0].candidateHash, parent.candidateHash);
+  assert.equal(payloadCalls[0].pageOperations[0].data.slug, "home");
+
+  const replay = await request(server, "POST", `/candidates/${parent.id}/payload-draft`, token, {
+    expectedCmsSnapshot: "cms_0",
+    idempotencyKey: "draft_home_1",
+    contentByPage: { home: { title: "Home", heroTitle: "Build with evidence", description: "Approved copy", claimRefs: ["claim_home"] } },
+  });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.candidate.id, draft.body.candidate.id);
+  assert.equal(payloadCalls.length, 1);
+  const conflict = await request(server, "POST", `/candidates/${parent.id}/payload-draft`, token, {
+    expectedCmsSnapshot: "cms_0",
+    idempotencyKey: "draft_home_1",
+    contentByPage: { home: { title: "Changed", heroTitle: "Changed", description: "Different copy", claimRefs: ["claim_home"] } },
+  });
+  assert.equal(conflict.status, 422);
+  assert.equal(conflict.body.code, "IDEMPOTENCY_CONFLICT");
+  assert.equal(payloadCalls.length, 1);
+
+  const qa = await request(server, "POST", `/candidates/${draft.body.candidate.id}/qa`, token, { qaPreviewId: "payload_preview_1" });
+  assert.equal(qa.status, 200);
+  assert.equal(qaCalls[0].candidateHash, draft.body.candidate.candidateHash);
+  assert.equal(store.candidates.get(draft.body.candidate.id).quality.candidateHash, draft.body.candidate.candidateHash);
+  assert.equal(parent.quality, null);
 });
 
 test("Payload plan endpoint is read-only and binds customer claims to the design revision", async () => {
@@ -179,7 +266,16 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   const codeAtlas = { getCompleteFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
   const root = await fs.mkdtemp("/tmp/sitepilot-api-generation-");
   const l2Token = "c".repeat(32);
-  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
+  const registeredPreviews = new Map();
+  const quality = new QualityAdapter({ preview: {
+    registerPreview: (preview) => registeredPreviews.set(preview.id, preview),
+    unregisterPreview: (id) => registeredPreviews.delete(id),
+    inspect: async ({ qaPreviewId, candidateHash }) => {
+      assert.equal(registeredPreviews.get(qaPreviewId)?.candidateHash, candidateHash);
+      return { checks: Object.fromEntries(["links", "locale", "responsive", "form", "seo"].map((check) => [check, { passed: true }])) };
+    },
+  } });
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, quality, { worktreeRoot: root });
   const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
   const run = store.createRun(project.id);
   run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
@@ -195,7 +291,7 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(grant.body.tool, "generate_candidate");
   assert.equal(grant.body.resource, `${root}/${run.id}`);
   const generated = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: grant.body.id });
-  assert.equal(generated.status, 201);
+  assert.equal(generated.status, 201, JSON.stringify(generated.body));
   assert.equal(generated.body.build.passed, true);
   assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
   assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
@@ -206,6 +302,11 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(preview.body.candidateHash, generated.body.candidate.candidateHash);
   assert.equal(preview.body.designHash, design.body.designHash);
   assert.equal(preview.body.localOnly, true);
+  assert.equal(registeredPreviews.get(preview.body.sessionId).candidateHash, generated.body.candidate.candidateHash);
+  const qa = await request(server, "POST", `/candidates/${generated.body.candidate.id}/qa`, token, { qaPreviewId: preview.body.sessionId, routes: ["/"], locales: ["en"] });
+  assert.equal(qa.status, 200);
+  assert.equal(qa.body.candidateHash, generated.body.candidate.candidateHash);
+  assert.equal(store.candidates.get(generated.body.candidate.id).quality.passed, true);
   const previewResponse = await fetch(preview.body.baseUrl);
   assert.equal(previewResponse.status, 200);
   assert.match(await previewResponse.text(), new RegExp(`data-sitepilot-design-hash="${design.body.designHash}"`));
@@ -214,6 +315,7 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(reused.body.sessionId, preview.body.sessionId);
   const closed = await request(server, "DELETE", `/previews/${preview.body.sessionId}`, token);
   assert.equal(closed.status, 200);
+  assert.equal(registeredPreviews.has(preview.body.sessionId), false);
   await fs.rm(root, { recursive: true, force: true });
 });
 

@@ -1,0 +1,6 @@
+.delivery-workbench{margin-top:32px}
+.action-row{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}
+.delivery-inputs{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(220px,.6fr);gap:16px;margin-top:14px}
+.delivery-inputs>div{display:grid;align-content:start;gap:12px}
+.delivery-workbench pre{margin-top:14px;max-height:360px;overflow:auto}
+@media(max-width:850px){.delivery-inputs{grid-template-columns:1fr}.action-row{justify-content:flex-start}}
