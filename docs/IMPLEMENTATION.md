@@ -1,8 +1,10 @@
 # V0 Implementation Notes
 
+Natural-language project intake is available through an optional server-side OpenAI-compatible adapter in src/intake.js. POST /intake/preview returns a validated RequirementBrief without creating a project; exact quote checks reject extracted facts that cannot be found in the user's request. The preview is held in server memory for 15 minutes, and POST /intake/confirm creates the project and Run only after confirmation. Model credentials stay in server environment variables. SiteStrategy and the page hierarchy still come from the existing deterministic industry planner; model-generated strategy and visual design generation remain future work.
+
 ## PRD anchor
 
-The current executable code started against **PRD Draft 0.6 (2026-10-10)**. Draft 0.7 extends the product target with the natural-language-to-design-draft-to-preview-feedback creation path and integrates the maintenance plan as a later mode. The design-draft/CanvasPatch slice is now implemented; real model intake, Payload-backed customer preview, and maintenance mode remain roadmap work.
+The current executable code started against **PRD Draft 0.6 (2026-10-10)**. Draft 0.7 extends the product target with the natural-language-to-design-draft-to-preview-feedback creation path and integrates the maintenance plan as a later mode. The design-draft/CanvasPatch slice and validated server-side natural-language intake are now implemented; Payload-backed customer preview, model-driven strategy/design generation, and maintenance mode remain roadmap work.
 
 Current evidence covers the guarded SitePilot workflow, CodeAtlas read-only adapter, source/worktree controls, immutable design drafts with schema-constrained CanvasPatch versions, Payload draft/build adapters, and the synthetic Payload CI preview. It does not yet prove a model provider-backed natural-language intake, a Puck canvas integration, a persistent public preview URL, or the GitHub Issue/PostHog maintenance loop.
 

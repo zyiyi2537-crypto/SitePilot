@@ -1,5 +1,7 @@
 # SitePilot
 
+Natural-language intake is available through an optional server-side OpenAI-compatible Chat Completions endpoint. Configure SITEPILOT_MODEL_API_KEY and SITEPILOT_MODEL_NAME; SITEPILOT_MODEL_BASE_URL defaults to the OpenAI API and may point to a local compatible service. The request is sent to that provider only when Analyze is selected. A preview is held in server memory for 15 minutes and creates no project until confirmation. Extracted facts require exact source quotes; unsupported model output is rejected.
+
 SitePilot is an evidence-driven, multi-agent website delivery workflow. It creates a strategy from a client's goal, evaluates CodeAtlas source evidence, writes only to an isolated worktree, and packages a candidate only after quality and review gates.
 
 ## Local development status (2026-10)

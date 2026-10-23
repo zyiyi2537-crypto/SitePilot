@@ -21,10 +21,38 @@ import { PayloadBuildPipeline } from "./payload-build.js";
 import { PINNED_SOURCES } from "./pinned-sources.js";
 import { LocalPreviewServer, loadPreviewManifest } from "./preview-server.js";
 import { createPayloadDraftPlan } from "./payload-template.js";
+import { createIntakeAdapterFromEnvironment } from "./intake.js";
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null) {
+function applyRequirementBrief(strategy, brief, confirmed = {}) {
+  if (!brief) return strategy;
+  const resolved = new Set();
+  if (confirmed.audience && String(confirmed.audience).trim()) resolved.add("audience");
+  if (confirmed.primaryConversion && String(confirmed.primaryConversion).trim()) resolved.add("primaryConversion");
+  if (confirmed.brandConstraints && confirmed.brandConstraints.length) resolved.add("brandConstraints");
+  if (confirmed.contentAvailable && confirmed.contentAvailable.length) resolved.add("contentAvailable");
+  if (confirmed.localeProvided || brief.locales.length) resolved.add("locale");
+  const questions = [...(brief.openQuestions || []).filter((question) => !resolved.has(question.field)), ...(strategy.openQuestions || [])];
+  const seen = new Set();
+  const openQuestions = questions.filter((question) => {
+    if (seen.has(question.field)) return false;
+    seen.add(question.field);
+    return true;
+  }).slice(0, 3);
+  return {
+    ...strategy,
+    openQuestions,
+    requirementSummary: brief.summary,
+    recommendedPages: brief.recommendedPages,
+    designSuggestions: brief.designSuggestions,
+    assumptions: brief.assumptions,
+  };
+}
+
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null) {
+  intake = intake || createIntakeAdapterFromEnvironment();
   const generatingRuns = new Set();
   const previewSessions = new Map();
+  const intakePreviews = new Map();
   const previewTtlMs = 15 * 60 * 1000;
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
@@ -77,6 +105,68 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
+      if (req.method === "POST" && url.pathname === "/intake/preview") {
+        if (!intake || typeof intake.analyze !== "function") return send(res, 503, { code: "MODEL_NOT_CONFIGURED", message: "Configure a server-side model provider before analyzing requirements" });
+        try {
+          const input = await readJson(req);
+          const requirementBrief = await intake.analyze(input.requestText);
+          const intakeId = "intake_" + crypto.randomUUID().replaceAll("-", "");
+          const expiresAt = Date.now() + previewTtlMs;
+          for (const [key, value] of intakePreviews) if (value.expiresAt <= Date.now()) intakePreviews.delete(key);
+          if (intakePreviews.size >= 100) return send(res, 429, { code: "INTAKE_PREVIEW_LIMIT", message: "Too many unconfirmed requirement previews" });
+          intakePreviews.set(intakeId, { requestText: input.requestText.trim(), requirementBrief, expiresAt });
+          return send(res, 200, { intakeId, expiresAt: new Date(expiresAt).toISOString(), requirementBrief });
+        } catch (error) {
+          return send(res, error.status || 422, { code: error.code || "INTAKE_FAILED", message: error.status ? error.message : "Requirement analysis failed" });
+        }
+      }
+      if (req.method === "POST" && url.pathname === "/intake/confirm") {
+        const input = await readJson(req);
+        const preview = intakePreviews.get(input.intakeId);
+        if (!preview || preview.expiresAt <= Date.now()) {
+          intakePreviews.delete(input.intakeId);
+          return send(res, 404, { code: "INTAKE_PREVIEW_EXPIRED" });
+        }
+        const supplemental = input.supplemental && typeof input.supplemental === "object" ? input.supplemental : {};
+        const manualText = (key, fallback = "") => {
+          if (supplemental[key] === undefined || supplemental[key] === "") return fallback;
+          if (typeof supplemental[key] !== "string" || supplemental[key].length > 500) throw new PolicyError("Invalid supplemental field: " + key, "INVALID_INPUT");
+          return supplemental[key].trim();
+        };
+        const manualList = (key, fallback) => {
+          if (supplemental[key] === undefined || supplemental[key] === "") return fallback;
+          if (!Array.isArray(supplemental[key]) || supplemental[key].length > 20 || supplemental[key].some((item) => typeof item !== "string" || item.length > 240)) {
+            throw new PolicyError("Invalid supplemental field: " + key, "INVALID_INPUT");
+          }
+          return supplemental[key].map((item) => item.trim()).filter(Boolean);
+        };
+        const brief = preview.requirementBrief;
+        const industry = manualText("industry", brief.industry);
+        if (!["general", "industrial", "saas"].includes(industry)) return send(res, 422, { code: "INVALID_INDUSTRY" });
+        const locales = manualList("locale", brief.locales.map((item) => item.value));
+        const allowedLocales = new Set(["zh-CN", "en", "en-US", "ja", "de", "fr"]);
+        if (locales.some((locale) => !allowedLocales.has(locale))) return send(res, 422, { code: "UNSUPPORTED_LOCALE" });
+        const project = store.createProject({
+          goal: preview.requestText,
+          initialRequest: preview.requestText,
+          requirementBrief: brief,
+          localeProvided: locales.length > 0,
+          industry,
+          audience: manualText("audience", brief.audience ? brief.audience.value : ""),
+          primaryConversion: manualText("primaryConversion", brief.primaryConversion ? brief.primaryConversion.value : ""),
+          locale: locales.length ? locales : undefined,
+          brandConstraints: manualList("brandConstraints", brief.brandConstraints.map((item) => item.value)),
+          contentAvailable: manualList("contentAvailable", brief.contentAvailable.map((item) => item.value)),
+        });
+        const run = store.createRun(project.id, { modelVersion: intake.modelVersion || "configured-model" });
+        run.strategy = applyRequirementBrief(planStrategy(project), brief, project);
+        run.payloadSchema = planPayloadSchema({ projectId: project.id, strategy: run.strategy, locales: project.locale });
+        run.checkpoint = "strategy_ready";
+        store.event(run.id, "strategy.created", { strategy: run.strategy.strategy, source: "natural-language-intake" });
+        store.persist?.();
+        intakePreviews.delete(input.intakeId);
+        return send(res, 201, { project, run });
+      }
       if (req.method === "GET" && url.pathname === "/projects") return send(res, 200, { projects: [...store.projects.values()] });
       const projectRunsMatch = url.pathname.match(/^\/projects\/([^/]+)\/runs$/);
       if (req.method === "GET" && projectRunsMatch) return send(res, 200, { runs: [...store.runs.values()].filter((run) => run.projectId === projectRunsMatch[1]) });
@@ -168,10 +258,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const run = store.createRun(runMatch[1], await readJson(req));
         const project = store.projects.get(run.projectId);
         const strategy = planStrategy(project);
-        run.strategy = strategy;
+        run.strategy = applyRequirementBrief(strategy, project.requirementBrief, project);
         run.payloadSchema = planPayloadSchema({
           projectId: project.id,
-          strategy,
+          strategy: run.strategy,
           locales: project.locale,
         });
         run.checkpoint = "strategy_ready";
@@ -241,12 +331,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (req.method === "POST" && answersMatch) {
         const run = store.runs.get(answersMatch[1]);
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
-        const revised = store.reviseRun(run.id, await readJson(req));
+        const answers = await readJson(req);
+        if (typeof answers.locale === "string") answers.locale = answers.locale.split(",").map((value) => value.trim()).filter(Boolean);
+        const revised = store.reviseRun(run.id, answers);
         const project = store.projects.get(revised.projectId);
-        revised.strategy = planStrategy({
+        const revisedProject = {
           ...project,
           ...revised.inputSnapshot,
-        });
+        };
+        revised.strategy = applyRequirementBrief(planStrategy(revisedProject), revisedProject.requirementBrief, revisedProject);
         revised.payloadSchema = planPayloadSchema({
           projectId: project.id,
           strategy: revised.strategy,

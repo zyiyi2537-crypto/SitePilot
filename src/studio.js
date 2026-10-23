@@ -6,6 +6,7 @@ let designDraft = null;
 let currentRun = null;
 let currentCandidate = null;
 let currentPreview = null;
+let intakePreview = null;
 
 function notice(message, error = false) {
   const target = $("#notice");
@@ -66,6 +67,8 @@ async function showRun() {
     details.append(node("dt", label), node("dd", value));
   }
   target.append(details);
+  const brief = run.inputSnapshot && run.inputSnapshot.requirementBrief;
+  if (brief && brief.summary) target.append(node("p", brief.summary, "intake-run-summary"));
   const questions = run.strategy?.openQuestions || [];
   if (questions.length) {
     const box = node("div", undefined, "questions");
@@ -152,6 +155,43 @@ function renderDesignDraft() {
 
 function checkbox(text) { const label = node("label"); const input = node("input"); input.type = "checkbox"; label.append(input, document.createTextNode(text)); return { label, input }; }
 
+function renderIntakePreview(preview) {
+  const brief = preview.requirementBrief;
+  const summary = $("#intake-summary");
+  const details = $("#intake-details");
+  summary.replaceChildren(node("p", brief.summary));
+  details.replaceChildren();
+  for (const [label, value] of [["目标受众", brief.audience], ["转化目标", brief.primaryConversion]]) {
+    if (!value) continue;
+    const row = node("p");
+    row.append(node("strong", label + "："), document.createTextNode(value.value + " "), node("small", "原文：“" + value.quote + "”", "muted"));
+    details.append(row);
+  }
+  for (const [label, values] of [["语言", brief.locales], ["品牌限制", brief.brandConstraints], ["已有资料", brief.contentAvailable], ["功能需求", brief.requestedFeatures]]) {
+    if (!values || !values.length) continue;
+    const group = node("div");
+    group.append(node("strong", label));
+    const list = node("ul");
+    for (const value of values) {
+      const item = node("li");
+      item.append(document.createTextNode(value.value));
+      if (value.quote) item.append(node("small", " 原文：“" + value.quote + "”", "muted"));
+      list.append(item);
+    }
+    group.append(list);
+    details.append(group);
+  }
+  if (brief.recommendedPages && brief.recommendedPages.length) details.append(node("p", "建议页面：" + brief.recommendedPages.join("、")));
+  if (brief.designSuggestions && brief.designSuggestions.length) details.append(node("p", "设计建议：" + brief.designSuggestions.join("；")));
+  if (brief.assumptions && brief.assumptions.length) details.append(node("p", "待确认的设计假设：" + brief.assumptions.join("；"), "muted"));
+  if (brief.openQuestions && brief.openQuestions.length) {
+    details.append(node("strong", "需要补充的信息"));
+    const list = node("ul");
+    for (const question of brief.openQuestions) list.append(node("li", question.question + (question.reason ? "（" + question.reason + "）" : "")));
+    details.append(list);
+  }
+}
+
 async function loadReviews() {
   const [{ registry }, { candidates }] = await Promise.all([api("GET", "/components"), api("GET", "/candidates")]);
   const components = $("#components"); components.replaceChildren();
@@ -185,7 +225,6 @@ $("#l2-token-field").style.display = "none";
 $("#refresh").onclick = () => action(loadProjects);
 $("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
 $("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
-$("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => { const form = new FormData(event.target); const input = Object.fromEntries(form); input.contentAvailable = input.contentAvailable.split(",").map((value) => value.trim()).filter(Boolean); const project = await api("POST", "/projects", input); projectId = project.id; const run = await api("POST", `/projects/${encodeURIComponent(project.id)}/runs`, {}); runId = run.id; await loadProjects(); event.target.reset(); }); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };
 $("#create-plan").onclick = () => action(async () => { if (!runId) throw new Error("请先选择项目 Run"); await api("POST", `/runs/${encodeURIComponent(runId)}/page-plan`, {}); await showRun(); });
 $("#create-design").onclick = () => action(async () => {
@@ -249,4 +288,37 @@ $("#run-qa").onclick = () => action(async () => {
   });
   currentCandidate.quality = { passed: report.passed, reportHash: report.reportHash, candidateHash: report.candidateHash };
   renderDelivery({ candidate: currentCandidate, preview: currentPreview, qa: report, previewType: "local-read-only" });
+});
+
+$("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => {
+  const requestText = new FormData(event.target).get("requestText").trim();
+  if (!requestText) throw new Error("请先描述网站需求");
+  intakePreview = await api("POST", "/intake/preview", { requestText });
+  renderIntakePreview(intakePreview);
+  $("#intake-review").hidden = false;
+  $("#confirm-intake").disabled = false;
+}); };
+$("#project-form [name=requestText]").addEventListener("input", () => {
+  intakePreview = null;
+  $("#intake-review").hidden = true;
+  $("#confirm-intake").disabled = true;
+});
+$("#confirm-intake").onclick = () => action(async () => {
+  if (!intakePreview) throw new Error("请先分析需求");
+  const values = Object.fromEntries(new FormData($("#project-form")));
+  const supplemental = {};
+  if (values.industry) supplemental.industry = values.industry;
+  if (values.audience.trim()) supplemental.audience = values.audience.trim();
+  if (values.primaryConversion.trim()) supplemental.primaryConversion = values.primaryConversion.trim();
+  for (const key of ["brandConstraints", "contentAvailable", "locale"]) {
+    if (values[key].trim()) supplemental[key] = values[key].split(",").map((value) => value.trim()).filter(Boolean);
+  }
+  const created = await api("POST", "/intake/confirm", { intakeId: intakePreview.intakeId, supplemental });
+  projectId = created.project.id;
+  runId = created.run.id;
+  intakePreview = null;
+  $("#intake-review").hidden = true;
+  $("#confirm-intake").disabled = true;
+  $("#project-form").reset();
+  await loadProjects();
 });

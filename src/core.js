@@ -111,6 +111,9 @@ export class SitePilotStore {
       primaryConversion: typeof input.primaryConversion === "string" ? input.primaryConversion.trim() : "",
       brandConstraints: Array.isArray(input.brandConstraints) ? input.brandConstraints : [],
       contentAvailable: Array.isArray(input.contentAvailable) ? input.contentAvailable : [],
+      initialRequest: typeof input.initialRequest === "string" ? input.initialRequest.trim() : "",
+      requirementBrief: input.requirementBrief ? clone(input.requirementBrief) : null,
+      localeProvided: input.localeProvided === true,
       constraints: input.constraints || [],
       status: "draft",
       createdAt: new Date().toISOString()
@@ -125,11 +128,14 @@ export class SitePilotStore {
     const snapshot = Object.freeze({
       goal: project.goal,
       industry: project.industry,
-      locale: project.locale,
+      locale: inputSnapshot.locale || project.locale,
       audience: inputSnapshot.audience ?? project.audience,
       primaryConversion: inputSnapshot.primaryConversion ?? project.primaryConversion,
       brandConstraints: inputSnapshot.brandConstraints ?? project.brandConstraints,
       contentAvailable: inputSnapshot.contentAvailable ?? project.contentAvailable,
+      initialRequest: project.initialRequest || project.goal,
+      requirementBrief: project.requirementBrief || null,
+      localeProvided: inputSnapshot.localeProvided ?? project.localeProvided,
       constraints: project.constraints,
       templateBaseCommit: inputSnapshot.templateBaseCommit || "payload-website-template:31ba7ee8271998ad7aa8963111764cbacf37b157",
       blockRegistryVersion: inputSnapshot.blockRegistryVersion || "registry-v0",
@@ -151,12 +157,13 @@ export class SitePilotStore {
     const previous = this.runs.get(runId);
     if (!previous) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
     if (previous.candidateIds.length) throw new PolicyError("A run with candidates cannot be revised", "POLICY_DENIED");
-    const allowed = ["audience", "primaryConversion", "brandConstraints", "contentAvailable"];
+    const allowed = ["audience", "primaryConversion", "brandConstraints", "contentAvailable", "locale"];
     const inputSnapshot = Object.fromEntries(
       allowed.map((key) => [key, answers[key] ?? previous.inputSnapshot[key]]),
     );
     const next = this.createRun(previous.projectId, {
       ...inputSnapshot,
+      localeProvided: inputSnapshot.locale ? true : previous.inputSnapshot.localeProvided,
       templateBaseCommit: previous.inputSnapshot.templateBaseCommit,
       blockRegistryVersion: previous.inputSnapshot.blockRegistryVersion,
       repositoryAllowlist: previous.inputSnapshot.repositoryAllowlist,

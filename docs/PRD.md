@@ -19,6 +19,7 @@
 | 0.5 | 2026-10-01 | 允许 Agent 在隔离 worktree/沙箱中写代码；CodeAtlas 组件可受控复用；引入有明确职责的多代理协作与代码审查门禁 | 项目作者 |
 | 0.6 | 2026-10-10 | 增加官网创建与持续维护双模式、GitHub/观测入口的分阶段授权边界；固定 Payload 模板的数据驱动构建路线 | 项目作者 |
 | 0.7 | 2026-10-21 | 补齐自然语言需求到设计草稿、组件/React 代码实现、真实预览和客户反馈迭代主线；将完整研发闭环规划整合为后续维护模式 | 项目作者 |
+| 0.8 | 2026-10-24 | 接入可选的服务端自然语言需求解析、需求草稿确认和原文引用校验；模型输出未通过验证时拒绝创建项目 | 项目作者 |
 
 ## 1. 一句话定义
 
@@ -1319,7 +1320,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 |---|---|---|
 | SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
-| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有 SiteStrategy、PagePlan，以及不可变 DesignDraft/CanvasPatch API 和 Studio 反馈入口；真实模型驱动需求理解仍未完成 | 继续接入模型适配器与客户资料证据 |
+| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；SiteStrategy 仍由确定性行业规划器生成，真实视觉设计和模型驱动策略仍未完成 | 接入客户资料证据、模型策略规划和真实设计画布 |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |
