@@ -20,6 +20,16 @@
         <label id="l2-token-field" hidden>执行凭据<input id="l2-token" type="password" autocomplete="off"></label>
         <button id="connect" type="button">连接</button>
       </section>
+      <section class="model-settings">
+        <div class="section-heading"><div><h2>模型连接</h2><p class="muted">Key 仅在本页面临时输入和当前进程内存使用；不会写入浏览器持久存储、数据库或日志。</p></div><span id="model-status" class="muted">未配置</span></div>
+        <div class="model-form">
+          <label>模型服务 URL<input id="model-base-url" type="url" autocomplete="off" placeholder="例如：https://api.example.com/v1 或 http://127.0.0.1:11434/v1"></label>
+          <label>模型名称<input id="model-name" type="text" autocomplete="off" placeholder="例如：gpt-5.6-sol"></label>
+          <label>接口协议<select id="model-api-mode"><option value="chat_completions">Chat Completions</option><option value="codex_responses">Responses / Pi</option></select></label>
+          <label>模型 API Key<input id="model-api-key" type="password" autocomplete="new-password" placeholder="仅在本次连接中使用"></label>
+        </div>
+        <div class="action-row"><button id="model-test" type="button">测试连接</button><button id="model-apply" class="primary" type="button">应用模型配置</button><button id="model-clear" type="button">清除服务端配置</button></div>
+      </section>
       <p id="notice" role="status" aria-live="polite"></p>
       <div id="client-view">
         <div class="columns">

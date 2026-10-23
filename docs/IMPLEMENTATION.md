@@ -1,12 +1,12 @@
 # V0 Implementation Notes
 
-Natural-language project intake is available through an optional server-side OpenAI-compatible adapter in src/intake.js. POST /intake/preview returns a validated RequirementBrief without creating a project; exact quote checks reject extracted facts that cannot be found in the user's request. The preview is held in server memory for 15 minutes, and POST /intake/confirm creates the project and Run only after confirmation. Model credentials stay in server environment variables. SiteStrategy and the page hierarchy still come from the existing deterministic industry planner; model-generated strategy and visual design generation remain future work.
+Natural-language intake uses an OpenAI-compatible adapter in src/intake.js, supporting both Chat Completions and Responses API. Studio can configure and test URL/model/key; interactive credentials are held only in process memory and are never returned to the browser or persisted. Environment configuration remains available for managed installs, including a bounded 60-second default model timeout (`SITEPILOT_MODEL_TIMEOUT_MS`). POST /intake/preview returns a validated RequirementBrief without creating a project; quotes must be supported by the original request. The preview is held in server memory for 15 minutes, and POST /intake/confirm creates the project and Run only after confirmation. SiteStrategy and page hierarchy still come from the deterministic industry planner; model-generated strategy, role delegation and visual design generation remain future work.
 
 ## PRD anchor
 
-The current executable code started against **PRD Draft 0.6 (2026-10-10)**. Draft 0.7 extends the product target with the natural-language-to-design-draft-to-preview-feedback creation path and integrates the maintenance plan as a later mode. The design-draft/CanvasPatch slice and validated server-side natural-language intake are now implemented; Payload-backed customer preview, model-driven strategy/design generation, and maintenance mode remain roadmap work.
+The current executable code started against **PRD Draft 0.6 (2026-10-10)**. Draft 0.7 extends the product target with the natural-language-to-design-draft-to-preview-feedback creation path and integrates the maintenance plan as a later mode. The design-draft/CanvasPatch slice and validated natural-language intake are implemented. Payload-backed customer preview, model-driven strategy/design generation, Pi agent-loop integration and maintenance mode remain roadmap work.
 
-Current evidence covers the guarded SitePilot workflow, CodeAtlas read-only adapter, source/worktree controls, immutable design drafts with schema-constrained CanvasPatch versions, Payload draft/build adapters, and the synthetic Payload CI preview. It does not yet prove a model provider-backed natural-language intake, a Puck canvas integration, a persistent public preview URL, or the GitHub Issue/PostHog maintenance loop.
+Current evidence covers the guarded SitePilot workflow, CodeAtlas read-only adapter, source/worktree controls, immutable design drafts with schema-constrained CanvasPatch versions, Payload draft/build adapters, synthetic Payload CI preview, and a real Responses API intake check against the locally configured test provider. It does not yet prove a Pi agent loop, dynamic multi-role delegation, Puck canvas integration, persistent public preview URL, or GitHub Issue/PostHog maintenance loop.
 
 ## Current flow
 
@@ -28,9 +28,9 @@ The V0 HTTP server exposes `POST /projects`, `POST /projects/:id/runs`, `POST /r
 
 `CandidateRevision` is the mutable-workflow boundary. Code and CMS changes create candidates; a `DraftVersion` is created only by `packageReview` after quality and review gates pass. The default in-memory store is a V0 executable specification; `src/persistence.js` provides an opt-in JSON durable store for local recovery.
 
-`src/orchestrator.js` composes the adapters into the guarded delivery sequence. Build failure stops before CMS/QA; QA failure leaves the candidate failed; only an explicit reviewer decision can create a DraftVersion.
+`src/orchestrator.js` composes the adapters into a guarded, currently deterministic delivery sequence. Its named business roles are not yet independent Pi agents. Build failure stops before CMS/QA; QA failure leaves the candidate failed; only an explicit reviewer decision can create a DraftVersion.
 
-`src/registry.js` implements the Block Registry boundary. CodeAtlas results begin as candidates and cannot be selected for a project until a reviewer verifies the license and tests. `src/tool-runtime.js` provides the common tool envelope, timeout, idempotency, policy version and replay record used by the multi-agent runtime.
+`src/registry.js` implements the Block Registry boundary. CodeAtlas results begin as candidates and cannot be selected for a project until a reviewer verifies the license and tests. `src/tool-runtime.js` provides a common tool envelope, timeout, idempotency, policy version and replay record for future Pi role tools; it is not yet connected to a Pi agent loop.
 
 `src/evidence.js` implements the content evidence chain: source snapshots are content-hashed and versioned, replacing a source expires its evidence records, and claims referencing expired evidence become `needs_reconfirmation` instead of silently remaining approved.
 

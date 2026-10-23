@@ -21,7 +21,7 @@ import { PayloadBuildPipeline } from "./payload-build.js";
 import { PINNED_SOURCES } from "./pinned-sources.js";
 import { LocalPreviewServer, loadPreviewManifest } from "./preview-server.js";
 import { createPayloadDraftPlan } from "./payload-template.js";
-import { createIntakeAdapterFromEnvironment } from "./intake.js";
+import { createIntakeAdapterFromEnvironment, createOpenAICompatibleIntakeAdapter } from "./intake.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -48,8 +48,23 @@ function applyRequirementBrief(strategy, brief, confirmed = {}) {
   };
 }
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null) {
+function modelConfigFromInput(input = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new PolicyError("Model configuration must be an object", "INVALID_INPUT");
+  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
+  const model = typeof input.model === "string" ? input.model.trim() : "";
+  const apiKey = typeof input.apiKey === "string" ? input.apiKey.trim() : "";
+  const apiMode = typeof input.apiMode === "string" ? input.apiMode.trim() : "chat_completions";
+  if (!baseUrl || baseUrl.length > 500 || !model || model.length > 200 || !apiKey || apiKey.length > 8192) throw new PolicyError("Model URL, model name and API key are required", "INVALID_INPUT");
+  if (!["chat_completions", "codex_responses"].includes(apiMode)) throw new PolicyError("Unsupported model API mode", "INVALID_INPUT");
+  return { baseUrl, model, apiKey, apiMode };
+}
+
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter) {
   intake = intake || createIntakeAdapterFromEnvironment();
+  const environmentIntake = intake;
+  const environmentModelConfig = environmentIntake ? { baseUrl: environmentIntake.endpoint || null, model: environmentIntake.modelVersion || null, apiMode: environmentIntake.apiMode || "chat_completions", source: "server" } : null;
+  let activeIntake = environmentIntake;
+  let activeModelConfig = environmentModelConfig;
   const generatingRuns = new Set();
   const previewSessions = new Map();
   const intakePreviews = new Map();
@@ -105,11 +120,33 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
+      if (req.method === "GET" && url.pathname === "/model/status") {
+        return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
+      }
+      if (req.method === "POST" && url.pathname === "/model/test") {
+        const config = modelConfigFromInput(await readJson(req));
+        const candidate = modelAdapterFactory(config);
+        try { await candidate.testConnection(); }
+        catch (error) { return send(res, error.status || 502, { code: error.code || "MODEL_TEST_FAILED", message: error.message || "Model connection failed" }); }
+        return send(res, 200, { ok: true, model: config.model, baseUrl: config.baseUrl, apiMode: config.apiMode });
+      }
+      if (req.method === "POST" && url.pathname === "/model/config") {
+        const input = await readJson(req);
+        if (input.clear === true) {
+          activeIntake = environmentIntake;
+          activeModelConfig = environmentModelConfig;
+          return send(res, 200, { configured: Boolean(activeIntake), cleared: true, model: activeModelConfig?.model || null, baseUrl: activeModelConfig?.baseUrl || null, apiMode: activeModelConfig?.apiMode || null, source: activeModelConfig?.source || null });
+        }
+        const config = modelConfigFromInput(input);
+        activeIntake = modelAdapterFactory(config);
+        activeModelConfig = { baseUrl: config.baseUrl, model: config.model, apiMode: config.apiMode, source: "studio-memory" };
+        return send(res, 200, { configured: true, model: config.model, baseUrl: config.baseUrl, apiMode: config.apiMode, keyConfigured: true, persisted: false });
+      }
       if (req.method === "POST" && url.pathname === "/intake/preview") {
-        if (!intake || typeof intake.analyze !== "function") return send(res, 503, { code: "MODEL_NOT_CONFIGURED", message: "Configure a server-side model provider before analyzing requirements" });
+        if (!activeIntake || typeof activeIntake.analyze !== "function") return send(res, 503, { code: "MODEL_NOT_CONFIGURED", message: "Configure a model provider in Studio before analyzing requirements" });
         try {
           const input = await readJson(req);
-          const requirementBrief = await intake.analyze(input.requestText);
+          const requirementBrief = await activeIntake.analyze(input.requestText);
           const intakeId = "intake_" + crypto.randomUUID().replaceAll("-", "");
           const expiresAt = Date.now() + previewTtlMs;
           for (const [key, value] of intakePreviews) if (value.expiresAt <= Date.now()) intakePreviews.delete(key);
@@ -158,7 +195,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           brandConstraints: manualList("brandConstraints", brief.brandConstraints.map((item) => item.value)),
           contentAvailable: manualList("contentAvailable", brief.contentAvailable.map((item) => item.value)),
         });
-        const run = store.createRun(project.id, { modelVersion: intake.modelVersion || "configured-model" });
+        const run = store.createRun(project.id, { modelVersion: activeIntake.modelVersion || "configured-model" });
         run.strategy = applyRequirementBrief(planStrategy(project), brief, project);
         run.payloadSchema = planPayloadSchema({ projectId: project.id, strategy: run.strategy, locales: project.locale });
         run.checkpoint = "strategy_ready";

@@ -25,7 +25,7 @@ async function api(method, route, body, credential = "api") {
 }
 
 async function action(fn) {
-  try { await fn(); notice("已更新"); } catch (error) { notice(error.message, true); }
+  try { notice(await fn() || "已更新"); } catch (error) { notice(error.message, true); }
 }
 
 async function loadProjects() {
@@ -41,6 +41,29 @@ async function loadProjects() {
     list.append(button);
   }
   if (projectId && projects.some((project) => project.id === projectId)) await selectProject(projectId, false);
+}
+
+function modelConfigFromForm() {
+  const baseUrl = $("#model-base-url").value.trim();
+  const model = $("#model-name").value.trim();
+  const apiMode = $("#model-api-mode").value;
+  const apiKey = $("#model-api-key").value;
+  if (!baseUrl || !model || !apiKey) throw new Error("请填写模型 URL、模型名称和 API Key");
+  return { baseUrl, model, apiMode, apiKey };
+}
+
+async function loadModelStatus() {
+  const status = await api("GET", "/model/status");
+  const label = $("#model-status");
+  if (!status.configured) {
+    label.textContent = "未配置";
+    return status;
+  }
+  label.textContent = `${status.model || "已配置"} · ${status.apiMode === "codex_responses" ? "Responses" : "Chat Completions"} · Key 已载入`;
+  if (status.baseUrl) $("#model-base-url").value = status.baseUrl;
+  if (status.model) $("#model-name").value = status.model;
+  if (status.apiMode) $("#model-api-mode").value = status.apiMode;
+  return status;
 }
 
 async function selectProject(id, reloadList = true) {
@@ -219,7 +242,25 @@ async function loadReviews() {
   if (!list.children.length) list.append(node("p", "暂无候选交付", "muted"));
 }
 
-$("#connect").onclick = () => action(async () => { await loadProjects(); if (!$("#review-view").hidden) await loadReviews(); });
+$("#connect").onclick = () => action(async () => { await loadProjects(); await loadModelStatus(); if (!$("#review-view").hidden) await loadReviews(); });
+$("#model-test").onclick = () => action(async () => {
+  const result = await api("POST", "/model/test", modelConfigFromForm());
+  return `模型连接成功：${result.model} · ${result.apiMode === "codex_responses" ? "Responses" : "Chat Completions"}`;
+});
+$("#model-apply").onclick = () => action(async () => {
+  const config = modelConfigFromForm();
+  await api("POST", "/model/test", config);
+  const result = await api("POST", "/model/config", config);
+  $("#model-api-key").value = "";
+  $("#model-status").textContent = `${result.model} · ${result.apiMode === "codex_responses" ? "Responses" : "Chat Completions"} · Key 已载入`;
+  return "模型配置已应用到当前进程";
+});
+$("#model-clear").onclick = () => action(async () => {
+  const result = await api("POST", "/model/config", { clear: true });
+  $("#model-api-key").value = "";
+  $("#model-status").textContent = result.configured ? `${result.model} · 环境配置` : "未配置";
+  return result.configured ? "已清除 Studio 配置，恢复服务端环境配置" : "已清除模型配置";
+});
 $("#review-token-field").style.display = "none";
 $("#l2-token-field").style.display = "none";
 $("#refresh").onclick = () => action(loadProjects);

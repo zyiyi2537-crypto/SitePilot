@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Evidence-driven multi-agent website delivery workflow",
+  "description": "Evidence-driven website delivery workflow with guarded role orchestration",
   "scripts": {
     "start": "node src/cli.js",
     "local:demo": "node src/local-cli.js",

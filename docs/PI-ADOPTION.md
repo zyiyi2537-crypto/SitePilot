@@ -5,11 +5,12 @@
 - Project: `earendil-works/pi`
 - Revision reviewed: `a276dabe57911253350bffb93cb7d7aff6a73261`
 - License: MIT (`LICENSE`)
-- Local review checkout: temporary `/tmp/pi-agent-source`; it is not copied into the SitePilot product tree.
+- Local source checkout: `/home/yingyu/agent/pi-agent`; its source remains outside the SitePilot product tree.
+- Packages reviewed: `@earendil-works/pi-agent-core`, `@earendil-works/pi-ai`, and experimental `@earendil-works/pi-durable`.
 
 ## Reuse decision
 
-SitePilot should reuse Pi's general agent-runtime principles, not embed the Pi coding-agent CLI as the product runtime.
+SitePilot adopts Pi as the planned agent-loop foundation, not the Pi coding-agent CLI as the product. The current SitePilot implementation has not imported Pi packages and does not yet run model-directed multi-agent roles. Existing role labels, deterministic orchestration, and durable tool journal are groundwork, not evidence of independent collaborating agents.
 
 Adopted principles:
 
@@ -28,7 +29,10 @@ SitePilot-specific boundaries remain authoritative:
 
 ## Integration order
 
-1. Add a durable tool-intent journal to `ToolRuntime` and recover interrupted actions only through `resumeInterrupted`: safe tools require a new run/idempotency key plus reviewer identity; unsafe tools remain blocked.
-2. Add checkpointed role tasks and join policies to the existing `DeliveryOrchestrator`.
-3. Add a provider adapter only after the deterministic fixture workflow passes.
-4. Consider `@earendil-works/pi-agent-core`/`pi-durable` as pinned dependencies only after a TypeScript build and license/lockfile review. Do not copy the whole monorepo or the coding-agent CLI.
+1. Add pinned `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` dependencies; adapt Studio's selected provider/model into Pi's model API and retain an OpenAI-compatible fallback only where required.
+2. Give each SitePilot business role a Pi `Agent` instance, but expose only role-specific tools that call through SitePilot's `ToolRuntime`, L0/L1/L2 grants, source allowlist, worktree policy and audit journal. Pi's generic filesystem and shell tools stay unavailable.
+3. Replace deterministic role hand-offs incrementally: Architect first, then Research/Content in read-only parallel, then Coding behind a scoped grant, then independent QA and Review. Every hand-off is a versioned artifact, not shared chat history.
+4. Add checkpointed tasks and joins using Pi durable only after its experimental API passes a compatibility/upgrade review. Keep SitePilot's store and permission model authoritative; interrupted side effects require SitePilot replay policy and reviewer identity.
+5. Prove different next-action paths across missing evidence, incompatible component, and QA failure cases. Until those tests pass, describe the pipeline as deterministic orchestration, not completed multi-agent collaboration.
+
+Do not copy the monorepo or coding-agent CLI. Pin package versions and source revision, build and license-check them, then run security and workflow tests before enabling a role in Studio.

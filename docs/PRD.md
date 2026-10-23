@@ -386,7 +386,7 @@ Architect 必须先输出可审阅的 SiteStrategy，再允许 Coding 开工。S
 
 工业设备站优先产品参数、应用场景、技术询盘与双语准确性；SaaS 站优先功能理解、定价证据、试用转化与帮助文档；消费活动站优先素材许可、活动时间、商品呈现与移动端转化。策略差异必须反映在页面树、组件选择、CMS schema、代码差异和 QA 检查集，而不只是标题或主题色。QA 检查完成后，Orchestrator 可针对失败调整实现计划，但不能自行更改已经批准的客户事实或业务目标。
 
-多代理框架优先评估 LangGraph 的持久化状态图与人工中断能力；代码执行层优先评估 OpenHands 等开源代理执行器的沙箱、文件编辑和终端模型。前者可直接作为编排依赖，后者只有在接口、隔离能力、许可证和资源开销符合本项目时才复用；不为“多代理”而引入整套重型服务。角色是 SitePilot 的业务协议，不绑定某个框架的角色类。V0 可让同一模型按不同角色运行，但必须验证权限、输入输出 schema、审查和写冲突，而不能声称已有独立智能体协同效果。
+多代理基础优先采用本地评估过的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前代码尚未集成 Pi loop，现有命名角色和流水线是确定性编排，不得描述为已完成多代理协作。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
 
 自然语言到设计草稿的第一版实现不引入通用拖拽建站器。Puck 只作为受限画布依赖候选：SitePilot 自己定义组件白名单、props schema、设计 token、响应式规则和序列化版本；画布的保存、差异、权限、审计和候选版本仍由 SitePilot 管理。若 Puck 与当前 Payload 区块无法保持同一渲染结果，优先缩小画布能力而不是维护第二套渲染实现。
 
@@ -1321,6 +1321,8 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 | SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
 | 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；SiteStrategy 仍由确定性行业规划器生成，真实视觉设计和模型驱动策略仍未完成 | 接入客户资料证据、模型策略规划和真实设计画布 |
+| Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 采用 Pi 模型适配器，增加密钥存储策略和角色级模型配置 |
+| Pi Agent 多角色运行时 | 已检查 Pi agent loop、工具钩子和 durable task 实现，并记录采用方案；SitePilot 尚未安装 Pi 依赖，当前流程仍是确定性流水线 | 先接入 Pi Agent/模型适配，再按 Architect → Research/Content → Coding → QA/Review 逐角色迁移，并通过多路径验收 |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |
