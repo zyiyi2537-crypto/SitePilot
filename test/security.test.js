@@ -214,6 +214,34 @@ test("run creation returns a bounded Payload schema plan", async () => {
   assert.ok(response.body.payloadSchema.collections.some((item) => item.name === "products"));
 });
 
+test("design draft and CanvasPatch endpoints preserve version hashes", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact", brandConstraints: ["logo"], contentAvailable: ["copy"] });
+  const run = store.createRun(project.id);
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "block_hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const created = await request(server, "POST", `/runs/${run.id}/design-drafts`, token, {});
+  assert.equal(created.status, 201);
+  assert.equal(created.body.pageTree[0].route, "/");
+  const patched = await request(server, "POST", `/design-drafts/${created.body.id}/patches`, token, {
+    expectedDesignHash: created.body.designHash,
+    feedback: "Tighten hero spacing",
+    operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: { density: "compact" } }],
+  });
+  assert.equal(patched.status, 201);
+  assert.equal(patched.body.patch.expectedDesignHash, created.body.designHash);
+  assert.notEqual(patched.body.draft.designHash, created.body.designHash);
+  const stale = await request(server, "POST", `/design-drafts/${created.body.id}/patches`, token, {
+    expectedDesignHash: created.body.designHash,
+    operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: { density: "wide" } }],
+  });
+  assert.equal(stale.status, 422);
+  const designs = await request(server, "GET", `/runs/${run.id}/design-drafts`, token);
+  assert.equal(designs.status, 200);
+  assert.equal(designs.body.designs.length, 2);
+});
+
 test("strategy answers return a new run instead of mutating history", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "website" });

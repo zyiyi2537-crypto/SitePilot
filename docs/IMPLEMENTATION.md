@@ -1,8 +1,16 @@
 # V0 Implementation Notes
 
+## PRD anchor
+
+The current executable code started against **PRD Draft 0.6 (2026-10-10)**. Draft 0.7 extends the product target with the natural-language-to-design-draft-to-preview-feedback creation path and integrates the maintenance plan as a later mode. The design-draft/CanvasPatch slice is now implemented; real model intake, Payload-backed customer preview, and maintenance mode remain roadmap work.
+
+Current evidence covers the guarded SitePilot workflow, CodeAtlas read-only adapter, source/worktree controls, immutable design drafts with schema-constrained CanvasPatch versions, Payload draft/build adapters, and the synthetic Payload CI preview. It does not yet prove a model provider-backed natural-language intake, a Puck canvas integration, a persistent public preview URL, or the GitHub Issue/PostHog maintenance loop.
+
 ## Current flow
 
 `createProject` -> `createRun` -> role tasks -> `createCandidate` -> `markQuality` -> `packageReview`.
+
+The creation-mode design slice adds `page-plan` -> `POST /runs/:id/design-drafts` -> `POST /design-drafts/:id/patches`. Each design revision is immutable, stores a design hash and parent, and is retained by the run. Patches accept only bounded `set_props`, `replace_props`, and `move` operations against approved page-plan components; stale hashes, cross-run parents, executable markup, and unknown components fail closed. Candidate creation records the current `designDraftId`, so later Payload/code work can bind to the exact design revision.
 
 The V0 HTTP server exposes `POST /projects`, `POST /projects/:id/runs`, `POST /runs/:id/candidates`, and reviewer-only `POST /candidates/:id/review`. It does not expose a quality-decision route: QA outcomes must be written by the internal orchestrator, not claimed by a client. The API requires distinct operator and reviewer bearer tokens; no route publishes production or moves a delivery pointer.
 

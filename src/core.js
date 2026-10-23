@@ -16,6 +16,68 @@ export const TOOLS = new Map([
 
 const id = (prefix) => `${prefix}_${crypto.randomUUID().replaceAll("-", "")}`;
 const hash = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const clone = (value) => structuredClone(value);
+function deepFreeze(value) {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+const SAFE_PROP = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const FORBIDDEN_PROP = /^(?:__proto__|prototype|constructor|dangerouslySetInnerHTML|html|script|javascript)$/i;
+
+function assertBoundedJson(value, depth = 0) {
+  if (depth > 5) throw new PolicyError("Design value is too deeply nested", "SCHEMA_REJECTED");
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "string" && (/<\/?[a-z][^>]*>/i.test(value) || /^javascript:/i.test(value))) {
+      throw new PolicyError("Design values cannot contain executable markup", "SCHEMA_REJECTED");
+    }
+    if (typeof value === "string" && value.length > 2000) throw new PolicyError("Design text is too long", "SCHEMA_REJECTED");
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 100) throw new PolicyError("Design array is too large", "SCHEMA_REJECTED");
+    for (const item of value) assertBoundedJson(item, depth + 1);
+    return;
+  }
+  if (typeof value === "object") {
+    const keys = Object.keys(value);
+    if (keys.length > 100) throw new PolicyError("Design object is too large", "SCHEMA_REJECTED");
+    for (const key of keys) {
+      if (!SAFE_PROP.test(key) || FORBIDDEN_PROP.test(key)) throw new PolicyError(`Invalid design property: ${key}`, "SCHEMA_REJECTED");
+      assertBoundedJson(value[key], depth + 1);
+    }
+    return;
+  }
+  throw new PolicyError("Design value must be JSON data", "SCHEMA_REJECTED");
+}
+
+function normalizePageTree(pageTree = []) {
+  if (!Array.isArray(pageTree) || !pageTree.length || pageTree.length > 25) throw new PolicyError("Design draft requires between one and twenty-five pages", "INVALID_INPUT");
+  const pages = pageTree.map((page) => {
+    if (!page || typeof page !== "object" || typeof page.page !== "string" || page.page.length > 64 || typeof page.route !== "string" || page.route.length > 256 || !page.route.startsWith("/")) throw new PolicyError("Invalid design route", "SCHEMA_REJECTED");
+    if (!Array.isArray(page.components) || !page.components.length || page.components.length > 40) throw new PolicyError(`Design route has an invalid component count: ${page.page}`, "SCHEMA_REJECTED");
+    const components = page.components.map((component, index) => {
+      if (!component || typeof component.registryId !== "string" || typeof component.name !== "string") throw new PolicyError("Design component must reference a registry block", "SCHEMA_REJECTED");
+      const props = component.props && typeof component.props === "object" && !Array.isArray(component.props) ? clone(component.props) : {};
+      assertBoundedJson(props);
+      return {
+        instanceId: component.instanceId || `${page.page}:${component.registryId}:${index}`,
+        registryId: component.registryId,
+        name: component.name,
+        source: component.source ? clone(component.source) : null,
+        propsSchema: component.propsSchema ? clone(component.propsSchema) : {},
+        props,
+      };
+    });
+    return { page: page.page, route: page.route, components };
+  });
+  if (new Set(pages.map((page) => page.page)).size !== pages.length) throw new PolicyError("Design draft contains duplicate pages", "SCHEMA_REJECTED");
+  return pages;
+}
+
+function designHash({ pageTree, designTokens, blockRegistryVersion, openQuestions, inputSnapshotHash }) {
+  return hash({ pageTree, designTokens, blockRegistryVersion, openQuestions, inputSnapshotHash });
+}
 
 export class PolicyError extends Error {
   constructor(message, code = "POLICY_DENIED") {
@@ -29,6 +91,8 @@ export class SitePilotStore {
     this.projects = new Map();
     this.runs = new Map();
     this.tasks = new Map();
+    this.designs = new Map();
+    this.canvasPatches = new Map();
     this.candidates = new Map();
     this.drafts = new Map();
     this.audit = [];
@@ -105,6 +169,103 @@ export class SitePilotStore {
     return next;
   }
 
+  createDesignDraft(runId, input = {}) {
+    const run = this.runs.get(runId);
+    if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    if (run.status === "superseded") throw new PolicyError("Cannot design a superseded run", "POLICY_DENIED");
+    const pageTree = normalizePageTree(input.pageTree || run.pagePlan?.routes);
+    if (run.pagePlan) {
+      const expected = new Map(run.pagePlan.routes.map((route) => [route.page, route]));
+      if (pageTree.length !== expected.size) throw new PolicyError("Design draft must include every planned route", "SCHEMA_REJECTED");
+      for (const page of pageTree) {
+        const sourcePage = expected.get(page.page);
+        if (!sourcePage || sourcePage.route !== page.route) throw new PolicyError("Design draft route is outside the page plan", "SCHEMA_REJECTED");
+        const allowed = new Map(sourcePage.components.map((component) => [component.registryId, component]));
+        if (page.components.length !== allowed.size) throw new PolicyError("Design draft must retain every planned component", "SCHEMA_REJECTED");
+        for (const component of page.components) {
+          const source = allowed.get(component.registryId);
+          if (!source || source.name !== component.name || component.source && JSON.stringify(component.source) !== JSON.stringify(source.source)) {
+            throw new PolicyError("Design draft component is outside the approved page plan", "SCHEMA_REJECTED");
+          }
+        }
+      }
+    }
+    if (input.parentId) {
+      const parent = this.designs.get(input.parentId);
+      if (!parent || parent.runId !== runId) throw new PolicyError("Parent design draft does not belong to run", "POLICY_DENIED");
+    }
+    const designTokens = input.designTokens && typeof input.designTokens === "object" ? clone(input.designTokens) : {
+      color: { primary: "#155eef", surface: "#ffffff", text: "#18212b" },
+      spacing: { unit: 4, section: 64 },
+      typography: { body: "system-ui", heading: "system-ui" },
+    };
+    assertBoundedJson(designTokens);
+    const openQuestions = Array.isArray(input.openQuestions) ? input.openQuestions.slice(0, 3).map((item) => ({
+      field: String(item.field || "design"), question: String(item.question || "待确认设计细节"),
+    })) : [];
+    const inputSnapshotHash = hash(run.inputSnapshot);
+    const blockRegistryVersion = run.inputSnapshot.blockRegistryVersion;
+    const draft = deepFreeze({
+      id: id("design"), runId, parentId: input.parentId || null,
+      goalRevisionId: run.revisedFromRunId || run.id,
+      inputSnapshotHash, pageTree, designTokens, blockRegistryVersion,
+      openQuestions, status: "draft", designHash: designHash({ pageTree, designTokens, blockRegistryVersion, openQuestions, inputSnapshotHash }),
+      createdAt: new Date().toISOString(), feedback: input.feedback ? String(input.feedback).slice(0, 2000) : null,
+    });
+    this.designs.set(draft.id, draft);
+    run.designDraftIds = [...(run.designDraftIds || []), draft.id];
+    run.designDraftId = draft.id;
+    run.checkpoint = "design_draft_ready";
+    this.event(runId, "design-draft.created", { designDraftId: draft.id, designHash: draft.designHash, parentId: draft.parentId });
+    return draft;
+  }
+
+  applyDesignPatch(designDraftId, input = {}) {
+    const previous = this.designs.get(designDraftId);
+    if (!previous) throw new PolicyError("Design draft not found", "RESOURCE_NOT_FOUND");
+    const run = this.runs.get(previous.runId);
+    if (!run || run.designDraftId !== previous.id) throw new PolicyError("Design draft is no longer current", "STALE_REVISION");
+    if (input.expectedDesignHash !== previous.designHash) throw new PolicyError("Design draft hash does not match", "STALE_REVISION");
+    if (!Array.isArray(input.operations) || input.operations.length < 1 || input.operations.length > 20) throw new PolicyError("One to twenty design operations are required", "INVALID_INPUT");
+    const pageTree = clone(previous.pageTree);
+    const affectedRoutes = new Set();
+    for (const operation of input.operations) {
+      if (!operation || typeof operation !== "object" || typeof operation.op !== "string") throw new PolicyError("Invalid design operation", "SCHEMA_REJECTED");
+      const page = pageTree.find((item) => item.page === operation.page);
+      if (!page) throw new PolicyError("Design operation references an unknown page", "SCHEMA_REJECTED");
+      const component = page.components.find((item) => item.instanceId === operation.componentId);
+      if (!component) throw new PolicyError("Design operation references an unknown component", "SCHEMA_REJECTED");
+      affectedRoutes.add(page.route);
+      if (operation.op === "set_props") {
+        if (!operation.props || typeof operation.props !== "object" || Array.isArray(operation.props)) throw new PolicyError("set_props requires an object", "SCHEMA_REJECTED");
+        assertBoundedJson(operation.props);
+        component.props = { ...component.props, ...clone(operation.props) };
+      } else if (operation.op === "replace_props") {
+        if (!operation.props || typeof operation.props !== "object" || Array.isArray(operation.props)) throw new PolicyError("replace_props requires an object", "SCHEMA_REJECTED");
+        assertBoundedJson(operation.props);
+        component.props = clone(operation.props);
+      } else if (operation.op === "move") {
+        const toIndex = Number(operation.toIndex);
+        const fromIndex = page.components.indexOf(component);
+        if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex >= page.components.length) throw new PolicyError("Invalid component position", "SCHEMA_REJECTED");
+        page.components.splice(fromIndex, 1); page.components.splice(toIndex, 0, component);
+      } else {
+        throw new PolicyError(`Unsupported design operation: ${operation.op}`, "SCHEMA_REJECTED");
+      }
+    }
+    const next = this.createDesignDraft(previous.runId, {
+      parentId: previous.id, pageTree, designTokens: previous.designTokens,
+      blockRegistryVersion: previous.blockRegistryVersion, openQuestions: previous.openQuestions, feedback: input.feedback,
+    });
+    const patch = deepFreeze({
+      id: id("canvas_patch"), designDraftId, nextDesignDraftId: next.id, expectedDesignHash: previous.designHash,
+      operations: clone(input.operations), actor: input.actor || "operator", affectedRoutes: [...affectedRoutes], createdAt: new Date().toISOString(),
+    });
+    this.canvasPatches.set(patch.id, patch);
+    this.event(previous.runId, "design-draft.patched", { designDraftId, nextDesignDraftId: next.id, canvasPatchId: patch.id, affectedRoutes: patch.affectedRoutes });
+    return { draft: next, patch };
+  }
+
   task(runId, role, kind, input) {
     if (!ROLES.includes(role)) throw new PolicyError(`Unknown role: ${role}`, "INVALID_INPUT");
     const run = this.runs.get(runId);
@@ -127,11 +288,17 @@ export class SitePilotStore {
   createCandidate(runId, input) {
     const run = this.runs.get(runId);
     if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    if (input.designDraftId) {
+      const design = this.designs.get(input.designDraftId);
+      if (!design || design.runId !== runId) throw new PolicyError("Candidate design draft does not belong to run", "POLICY_DENIED");
+    }
+    const designDraftId = input.designDraftId || run.designDraftId || null;
     const candidate = {
       id: id("candidate"), runId, status: "candidate", parentId: input.parentId || null,
+      designDraftId,
       codeArtifact: input.codeArtifact || null, cmsSnapshot: input.cmsSnapshot || null,
       sourceRefs: input.sourceRefs || [], quality: null, review: null,
-      candidateHash: hash(input), createdAt: new Date().toISOString()
+      candidateHash: hash({ ...input, designDraftId }), createdAt: new Date().toISOString()
     };
     this.candidates.set(candidate.id, candidate);
     run.candidateIds.push(candidate.id);

@@ -1,10 +1,10 @@
 # SitePilot 产品需求文档（PRD）
 
-> 文档状态：Draft 0.6
+> 文档状态：Draft 0.7
 > 产品阶段：本地开发中；本文数字均为目标，除非标记 Result
 > 目标用户：官网交付项目负责人、交付工程师、内容/质量审阅人  
 > 文档读者：项目作者、潜在协作者、Agent/RAG 岗位面试官  
-> 更新时间：2026-10-10
+> 更新时间：2026-10-21
 > 产品代号：SitePilot  
 > 数据原则：只使用公开开源代码、公开文档和虚构客户资料；严禁导入或复刻任职公司的模板、组件、CMS、客户代码、设计稿、埋点或内部文档。
 
@@ -18,6 +18,7 @@
 | 0.4 | 2026-10-01 | 确认 CodeAtlas 为独立的代码/文档知识库；SitePilot 通过 REST 管理资料、通过只读 MCP 检索；采用 Payload 官方 Website Template，移除重复的内容 RAG 基础设施 | 项目作者 |
 | 0.5 | 2026-10-01 | 允许 Agent 在隔离 worktree/沙箱中写代码；CodeAtlas 组件可受控复用；引入有明确职责的多代理协作与代码审查门禁 | 项目作者 |
 | 0.6 | 2026-10-10 | 增加官网创建与持续维护双模式、GitHub/观测入口的分阶段授权边界；固定 Payload 模板的数据驱动构建路线 | 项目作者 |
+| 0.7 | 2026-10-21 | 补齐自然语言需求到设计草稿、组件/React 代码实现、真实预览和客户反馈迭代主线；将完整研发闭环规划整合为后续维护模式 | 项目作者 |
 
 ## 1. 一句话定义
 
@@ -47,6 +48,38 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 
 可交付预览必须使用该 worktree 和对应 CMS snapshot 在隔离环境运行；先锁定依赖、执行类型检查/构建/单测，再以固定 candidate hash 启动测试预览，完成桌面/移动 Playwright、链接、SEO、表单、语言与必要的人工视觉检查。Node 24.15+、pnpm 锁文件和固定镜像是 Payload 基线的构建前提。没有 Docker/等价隔离运行器、锁定依赖或沙箱 CMS 时只返回 blocked/needs_input，不回退宿主执行，不把 manifest 一致性检查、结构性预览或 Mock 结果称为真实构建。正式 DraftVersion 仅在构建、QA、来源审查及独立 Review 通过后创建。
 
+### 自然语言需求到前端代码与预览主流程（创建模式主线）
+
+这是 SitePilot 面向客户的第一条主流程，也是 Draft 0.7 新增的产品主线。客户不需要先准备 Figma 才能开始；客户可以先用自然语言描述目标，系统再把需求逐步变成可审阅的设计草稿、真实页面代码和可访问预览。该流程不是“一次生成任意 HTML”，而是让自然语言经过结构化设计、受控组件和真实 Payload 工程，最后得到可以继续修改的版本。
+
+```text
+自然语言目标
+  → RequirementBrief 与少量澄清
+  → SiteStrategy / PagePlan / DesignTokens
+  → 受限组件画布初步设计（Puck 通过验证后采用，否则用轻量替代）
+  → CodeAtlas 组件证据与 ComponentPlan
+  → Payload 区块映射、CMS 草稿与 worktree 代码
+  → 固定候选构建和桌面/移动预览
+  → 客户自然语言反馈或画布反馈
+  → 新的 child CandidateRevision、复测和新预览
+```
+
+**第一步：理解需求。** Agent 将客户描述整理为 `RequirementBrief`，至少包括受众、业务目标、主要转化动作、语言、页面范围、功能、品牌约束、素材情况和验收目标。它把“客户明确说过的事实”“可以先建议的设计选择”和“尚未确认的假设”分开。产品参数、认证、价格、联系方式和案例业绩等事实没有来源时只能标为待确认；配色、间距和区块顺序可以先形成可修改建议。每轮最多提出三个最影响下一步的澄清问题，并说明每个问题会影响哪一页或哪项功能。
+
+**第二步：形成初步设计。** Architect 根据 `RequirementBrief` 和证据生成 `SiteStrategy`、`PagePlan`、`DesignTokens`、响应式规则和交互状态。没有设计稿时，系统可以生成 `design-incomplete` 的初步方案；该标记只说明仍有视觉细节待确认，不阻止生成演示预览。系统应先提供一个能打开的首页或关键页面，而不是在资料不完整时无限等待。设计方案必须能回链到需求、证据和待确认项，并允许客户逐项修改。
+
+**第三步：用受限画布让客户看到设计。** 优先验证 Puck 是否适合作为可嵌入的 React 页面画布，用于把 `PagePlan` 和已登记的 Block Registry 区块快速呈现为桌面/手机设计草稿；许可证、兼容性或安全边界未通过前，它仍是候选，不算已集成依赖。无论采用 Puck 还是轻量替代实现，画布都不是最终 CMS 或任意 HTML/JS 执行器：它只能使用已登记组件、受控 props、设计 token 和允许的布局规则；客户拖动或调整后产生结构化 `CanvasPatch`，不能直接写入任意源码。画布版本保存为 `DesignDraft`，同时记录组件 ID、属性、响应式规则、待确认项和输入快照。
+
+**第四步：把设计映射成真实工程。** Research Agent 通过 CodeAtlas 检索固定提交的模板、组件、Payload schema、依赖和测试证据。SitePilot 先核对许可证、版本、依赖和兼容性，再将画布中的组件 ID 映射为 Payload `layout` 区块或当前项目的 React 组件。已有组件优先复用；没有合适组件时，Coding Agent 才在项目隔离 worktree 的白名单路径编写或适配代码。画布配置不是最终交付代码，Payload 页面和前端代码才是运行时来源；两者必须通过稳定的区块 schema 和映射记录保持一致。
+
+**第五步：生成真实预览。** Content/CMS Agent 将已确认的客户资料写入 Payload 沙箱草稿，Coding Agent 提交对应代码候选，系统把代码 commit、锁文件、CMS snapshot、来源清单和 `DesignDraft` 绑定为一个 `CandidateRevision`。构建和预览必须使用该候选的真实 Payload 工程，不以 Puck 画布截图或静态 HTML 代替。构建成功后运行桌面/手机 Playwright、链接、表单、SEO、无障碍和必要的人工视觉检查；失败则保留失败候选，不移动上一稳定预览指针。
+
+**第六步：接受反馈并生成下一版。** 客户可以输入“导航改成产品分类下拉”“首页留白多一点”“产品详情增加参数表”，也可以在画布上选中一个区块提出意见。系统先将反馈定位到需求、设计区块、CMS 字段、代码文件或质量问题，再选择内容更新、`CanvasPatch`、代码补丁或澄清问题。每次有意义的修改都创建新的 `GoalRevision`/`CandidateRevision`，重新执行受影响检查并生成新的预览；旧版本和旧 CMS snapshot 保留，可整体回滚，不能只回滚代码而留下不匹配的内容。
+
+**第七步：人工收口。** 预览可以反复迭代，但只有构建、质量检查、来源审查和独立 Review 全部通过后，`package_review` 才能创建正式 `DraftVersion`。项目负责人批准的是一个绑定代码、CMS、依赖和证据 hash 的可审阅版本，不等于生产发布。生产合并、部署、域名、数据迁移和删除不属于这条自动流程。
+
+若 Puck 通过许可证、兼容性和渲染一致性验证，它承担“快速看设计、改结构、收集反馈”的受限画布职责；否则采用轻量受控画布。无论选择哪种方案，Payload 都是内容模型、草稿和最终网站运行底座，SitePilot Agent 负责需求理解、证据检索、组件选择、代码/CMS 修改、构建和质量闭环。第一版不同时维护一套独立的 HTML 设计系统和一套 Payload 设计系统。
+
 它不是“输入一句话就生成网页”的聊天机器人，也不是把固定脚本包一层大模型。核心价值是：
 
 1. 将散落文档、旧站点、组件证据和质量结果组织成可追溯的交付链路。
@@ -60,10 +93,11 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 
 | 系统 | 在本项目中的职责 | 不承担的职责 |
 |---|---|---|
-| SitePilot | 理解交付目标、制定网站策略、查找证据、选择工具、在隔离工作区编写代码、创建 CMS 草稿、验证并组织人审 | 修改 CodeAtlas 服务、写入生产仓库、生产部署或绕过审批 |
+| SitePilot | 理解自然语言建站目标、制定网站策略、查找证据、选择工具、在隔离工作区编写代码、创建 CMS 草稿、生成设计草稿与预览、验证并组织人审 | 修改 CodeAtlas 服务、写入生产仓库、生产部署或绕过审批 |
 | CodeAtlas | 独立提供代码、项目文档和 Wiki 的解析、索引、权限过滤及引用检索；作为可复用代码知识库，为代理提供固定 commit 的模板、组件、CMS schema、测试和依赖证据 | 生成客户业务事实、代替 SitePilot 决策或向 Agent 暴露 CodeAtlas 写入权限 |
 | Payload | 保存自建的页面、产品、案例、表单配置和多语言草稿 | 接入任职公司的 CMS 或自动批准交付 |
 | Payload Website Template | 提供 Next.js、Payload、页面区块、草稿/预览、SEO 和表单的基础工程 | 替代 Agent 的策略选择；未知来源代码必须先经过复用审查 |
+| Puck（受限画布候选） | 技术验证通过后，将已登记 React 区块组合为可交互设计草稿 | 尚未作为已集成依赖；许可证、Payload 兼容性和安全评估通过前不进入正式依赖 |
 | Playwright / Lighthouse | 验证页面交互、响应式、表单和质量，保存检查证据 | 把一次通过当作上线许可 |
 | Umami | 可选地核验独立沙箱中的测试事件 | 读取真实客户埋点、证明真实询盘增长 |
 
@@ -73,13 +107,32 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 
 虚构工业客户提出：“把已有产品资料做成中文/英文官网，支持产品筛选和询盘。”SitePilot 应完成：
 
-1. 读取合成公司介绍、产品参数和术语表，指出缺失或冲突，不补造认证和业绩。
-2. Architect Agent 依据行业、受众和转化目标制定网站策略、页面树、设计方向与技术方案；Research Agent 在 CodeAtlas 查找固定提交的模板、组件、CMS schema 和测试证据。
-3. Coding Agent 在项目专属 worktree 中复用、适配或编写页面与组件；Content/CMS Agent 建立 Payload 字段和草稿。两者的文件写入由工作区权限和路径白名单限制。
-4. QA Agent 在隔离预览中检查语言切换、产品筛选、移动端和测试询盘；失败后将可复现问题交给 Coding Agent 局部修复并复测。
-5. Review Agent 核对来源、许可、事实和变更范围，输出本地提交/补丁、预览地址、证据、质量报告及未决问题，等待负责人审阅。
+1. 负责人先用自然语言创建项目；Agent 返回简短需求理解、已知事实、设计建议、未知项和最多三个阻断问题。Figma 与素材资料是可选输入，不是开始条件。
+2. Agent 读取合成公司介绍、产品参数和术语表，指出缺失或冲突，不补造认证和业绩；可对非事实的视觉选择先做可调整建议。
+3. Architect Agent 依据行业、受众和转化目标制定网站策略、页面树、设计方向、响应式规则与技术方案；Research Agent 在 CodeAtlas 查找固定提交的模板、组件、CMS schema 和测试证据。
+4. SitePilot 使用受限组件画布和已登记区块展示初版设计；若缺少移动 Frame 或品牌规范，则标记设计未完整，但不阻止生成演示预览。
+5. Coding Agent 在项目专属 worktree 中复用、适配或编写页面与组件；Content/CMS Agent 建立 Payload 字段和草稿。两者的文件写入由工作区权限和路径白名单限制。
+6. QA Agent 在 Payload 隔离预览中检查语言切换、产品筛选、移动端和测试询盘；失败后将可复现问题交给 Coding Agent 局部修复并复测。
+7. 客户可继续用自然语言或针对画布区块反馈；SitePilot 生成新的候选版本，显示差异并保留回滚点。
+8. Review Agent 核对来源、许可、事实和变更范围，输出本地提交/补丁、预览地址、证据、质量报告及未决问题，等待负责人审阅。
 
 CodeAtlas 检索到代码只代表“可评估的候选”，不代表当前网站已具备该能力。Agent 可在固定来源、许可证明确、依赖可锁定且沙箱策略允许时直接适配；未通过审查或无法兼容时，必须报告限制并请求人工决定。V0 先要求产品列表，交互筛选可作为受控代码生成和复用的扩展验收。
+
+## 1.3 两份规划的统一方式：一个平台、两种入口、一个工程内核
+
+`cms-agent-platform-plan.md` 与本 PRD 不是同一条产品流程。前者定义“已有网站如何进入研发与线上 Bug 闭环”，本 PRD 的创建模式定义“新网站如何从自然语言进入首版预览”。它们被整合为 SitePilot 的两个模式，而不是把两条流程硬拼成同一个 MVP：
+
+| 层次 | 创建模式（当前主线） | 维护模式（后续阶段） |
+|---|---|---|
+| 用户入口 | 自然语言目标、客户资料、可选设计稿、参考网站 | GitHub Issue、人工 Bug、经脱敏归并的线上错误 |
+| 第一项产物 | RequirementBrief、SiteStrategy、DesignDraft、PagePlan | IssueTask、复现记录、固定 base SHA 与修复计划 |
+| 实现方式 | 受限画布确认方向，再由 Agent 适配 Payload/React 代码 | 在已交付版本的独立 worktree 中复现并修改代码 |
+| 预览/验证 | 生成候选站点预览，接受客户反馈并创建 child candidate | CI、浏览器检查、独立 Review 和 Human QA |
+| 最终出口 | 人工批准的 DraftVersion；不自动上线 | 人工批准的 PR；不自动合并或部署 |
+
+两种模式共享 Project、InputSnapshot、AgentRun、CodeAtlas 只读证据、Block Registry、worktree/沙箱、CandidateRevision、QualityCheck、ReviewDecision、AuditEvent、版本回滚和预览基础设施。创建模式的客户反馈可以在需要时转成维护任务；维护模式若发现需要新增页面或改变信息架构，应回到创建模式的设计/候选流程。这样不为建站和修 Bug 各做一套编排器，也不把普通客户修改误当成 GitHub Issue。
+
+下一阶段先完成创建模式的自然语言到预览闭环；维护模式先保留共享数据模型和本地模拟，待创建模式稳定后再接 GitHub Webhook、PR 和可选 PostHog。远端仓库写入、PR、合并、生产发布和数据迁移仍是彼此独立的授权动作。
 
 ## 2. 背景与问题
 
@@ -128,13 +181,15 @@ CodeAtlas 检索到代码只代表“可评估的候选”，不代表当前网�
 
 MVP 必须跑通：
 
-1. 导入一个虚构客户资料包和一个公开/演示网站。
-2. 将合成资料导入项目专属的 CodeAtlas document collection，通过统一检索识别目标、约束与缺失信息；SitePilot 保存来源快照和 Claim 关系。V0 由管理员在 CodeAtlas 管理台导入，自动导入须等待受限服务接口。
-3. 通过只读 CodeAtlas MCP 检索已登记区块和新候选，记录仓库、提交、路径和符号证据；新候选经许可、依赖和沙箱适配审查后可复用。
-4. 动态制定信息架构和视觉/转化策略，在项目 worktree 编写页面与组件，并写入 Payload 沙箱 CMS。
-5. 在桌面与移动视口运行浏览器检查、表单回放、链接检查和 Lighthouse。
-6. 发现问题后改变下一步计划，必要时向人提出少量具体问题。
-7. 输出预览 URL、版本差异、证据轨、质量报告、未决问题与交付清单。
+1. 客户只提供一段自然语言目标也能开始；系统生成结构化 `RequirementBrief`，资料不足时提出最多三个关键澄清问题。
+2. 生成可审阅的 `SiteStrategy`、`PagePlan`、`DesignTokens` 和首个可查看的 `DesignDraft`；没有 Figma 时也能生成明确标注待确认项的初步设计。
+3. 在 Puck 许可证、依赖、安全与 Payload 区块映射评估通过后，用受限画布预览已登记区块；若评估不通过，使用 SitePilot 自己的结构化 PagePlan 预览，不把 Puck 当成项目阻断条件。
+4. 导入一个虚构客户资料包和一个公开/演示网站；合成资料在项目专属 CodeAtlas collection 中检索，并由 SitePilot 保存来源快照和 Claim 关系。V0 管理员导入，自动导入须等待受限接口。
+5. 通过只读 CodeAtlas MCP 检索已登记区块和候选，记录仓库、提交、路径和符号证据；新候选经许可证、依赖和沙箱适配审查后才可复用。
+6. 将设计草稿中的已登记区块映射为 Payload layout，在项目 worktree 编写/适配页面与组件，并写入 Payload 沙箱 CMS。
+7. 在桌面与移动视口运行浏览器检查、表单回放、链接检查和 Lighthouse。
+8. 发现问题或收到自然语言/画布反馈后调整计划，生成新的候选预览而不是覆盖旧版本，并保留可回滚的代码与 CMS 快照。
+9. 输出可访问预览 URL、版本差异、证据轨、质量报告、未决问题与交付清单；远端 Git 写入和生产发布不属于 MVP。
 
 ### 4.2 成功标准
 
@@ -332,6 +387,8 @@ Architect 必须先输出可审阅的 SiteStrategy，再允许 Coding 开工。S
 
 多代理框架优先评估 LangGraph 的持久化状态图与人工中断能力；代码执行层优先评估 OpenHands 等开源代理执行器的沙箱、文件编辑和终端模型。前者可直接作为编排依赖，后者只有在接口、隔离能力、许可证和资源开销符合本项目时才复用；不为“多代理”而引入整套重型服务。角色是 SitePilot 的业务协议，不绑定某个框架的角色类。V0 可让同一模型按不同角色运行，但必须验证权限、输入输出 schema、审查和写冲突，而不能声称已有独立智能体协同效果。
 
+自然语言到设计草稿的第一版实现不引入通用拖拽建站器。Puck 只作为受限画布依赖候选：SitePilot 自己定义组件白名单、props schema、设计 token、响应式规则和序列化版本；画布的保存、差异、权限、审计和候选版本仍由 SitePilot 管理。若 Puck 与当前 Payload 区块无法保持同一渲染结果，优先缩小画布能力而不是维护第二套渲染实现。
+
 示例：
 
 ~~~json
@@ -406,7 +463,7 @@ CodeAtlas 当前 MCP 文档查询按 collection 授权；现有上传端点只�
 
 ## 10. 工具目录与契约
 
-完整 MVP 采用下列 14 类 SitePilot 工具，名称和输入输出稳定，底层实现可以替换。V0 只启用完成一条代码生成闭环所需的最小集合；CodeAtlas 的只读 MCP 操作由 `retrieve_evidence` 和 `search_codeatlas` 适配器调用，不额外计入 SitePilot 工具数。
+完整 MVP 采用下列 16 类 SitePilot 工具，名称和输入输出稳定，底层实现可以替换。创建模式首轮优先启用需求规划、设计草稿、组件检索、代码/CMS 候选、构建和质量检查；维护模式复用同一工具层，再增加 GitHub Issue/PR 与错误观测适配器。CodeAtlas 的只读 MCP 操作由 `retrieve_evidence` 和 `search_codeatlas` 适配器调用，不额外计入 SitePilot 工具数。
 
 | 工具 | 风险 | 作用 | 自动执行 |
 |---|---:|---|---|
@@ -415,6 +472,8 @@ CodeAtlas 当前 MCP 文档查询按 collection 授权；现有上传端点只�
 | retrieve_evidence | L0 | 通过只读 MCP 检索项目资料，合并 SitePilot 本地确认与检查证据 | 是 |
 | search_codeatlas | L0 | 通过只读 MCP 检索公开/演示代码和工程文档 | 是 |
 | propose_information_architecture | L1 | 生成页面树、字段模型和待确认项 | 是，留审计 |
+| create_design_draft | L1 | 根据已审阅的策略/页面计划和已登记区块生成版本化的可预览设计结构 | 是；仅允许注册组件及受控 props |
+| apply_design_patch | L1 | 将自然语言或画布反馈转换为 DesignDraft 的受限结构化修改 | 是；不写源码，不接受任意 HTML/JS |
 | create_payload_draft | L1 | 在沙箱 CMS 创建/更新草稿 | 是，须幂等 |
 | create_project_worktree | L2 | 从固定模板提交创建项目专属 Git worktree、路径白名单和资源配额 | 项目预授权后 |
 | fetch_pinned_source | L2 | 从服务端仓库白名单按完整 commit 获取源码到隔离暂存区并校验提交 | 项目与仓库预授权后 |
@@ -438,6 +497,8 @@ MVP 不注册 publish_production、push_remote、create_pull_request、write_cod
 | retrieve_evidence | query、source_types、version_filter、locale、top_k | EvidenceCard 列表、覆盖/冲突提示、retrieval_trace | 无合法租户范围、来源版本撤销、低相关度 | 高风险声明无证据时进入 Needs input |
 | search_codeatlas | repository_allowlist、operation、query、framework_constraints、required_evidence | code EvidenceRecord、index_status、compatibility_notes | MCP 不可用、索引过期、无固定 commit、许可不明 | 来源不明时不可复用 |
 | propose_information_architecture | requirements、evidence_refs、content_constraints、allowed_blocks | SiteMapProposal、PagePlan、FieldPlan、open_questions | 必需目标缺失、事实冲突、无可用区块 | 每轮最多提出 3 个阻断问题 |
+| create_design_draft | strategy_id、page_plan_id、block_registry_version、design_tokens、viewport_set | DesignDraft、component_refs、open_questions、design_hash | 组件未登记、props 超 schema、事实 Claim 无来源、策略版本过期 | 只能输出待确认的视觉建议，不能确认客户事实 |
+| apply_design_patch | design_draft_id、expected_design_hash、feedback、target_component_ids、patch_ops | 新 DesignDraft 版本、diff、affected_routes、affected_checks | 区块越权、patch 与 hash 冲突、超出当前组件能力 | 涉及业务目标、事实内容或范围扩张时澄清 |
 | create_payload_draft | candidate_id、approved_page_plan、content_refs、expected_cms_snapshot、page_operations、affected_check_ids | 新 CMS 草稿快照、cms_record_refs、diff | schema 校验失败、unsupported claim、非沙箱目标、候选版本冲突 | 非 CMS 字段变更转交 Coding Agent |
 | create_project_worktree | template_commit、project_id、run_id、limits | worktree_id、base_commit、允许路径与隔离环境 | 模板提交不存在、路径越界、资源不足 | 新模板来源需负责人确认 |
 | fetch_pinned_source | repository_id、commit_sha、source_evidence_id、size_limit、grant_id | quarantine_snapshot_id、verified_commit、file_manifest、content_hash | 仓库不在白名单、commit 不符、网络/体积超限、源码无法验证 | 新来源或扩大范围需负责人重新授权 |
@@ -660,13 +721,13 @@ SitePilot 不采用“左侧菜单 + KPI 卡片 + 中间聊天框”的普通后
 
 ### 13.3 页面二：Studio Canvas
 
-三栏同步工作区：
+Studio Canvas 是客户创建和修改首版设计的主工作区，不是聊天记录页。页面顶部始终显示当前目标、策略版本、设计版本和待确认事项；主体采用“需求与证据 / 设计画布 / 版本反馈”三栏：
 
-1. Evidence Shelf：筛选客户证据、公开技术证据、推断和冲突。
-2. Responsive Preview：切换桌面/平板/手机、locale、页面版本和表单状态。
-3. Decision Ledger：显示 observation → decision → action → result。
+1. **需求与证据**：展示 RequirementBrief、客户资料 Claim、设计建议、缺口与来源；建议/推断不得显示成已确认事实。
+2. **响应式设计画布**：用受限 Puck 候选组件即时预览首页/页面，可切换桌面/平板/手机、locale、页面版本和交互状态；只显示当前 Block Registry 的组件与 schema 允许的属性。
+3. **版本与反馈**：提供自然语言反馈输入、选中区块注释、候选 diff、构建/QA 状态、上一稳定预览和恢复入口。
 
-底部是低调的 command composer。用户可以输入“检查英文产品页的表单和 SEO”，但它不占据首屏；命令先转成可见的目标、范围和风险，再执行。
+客户可以输入“导航改成产品分类下拉”或选中 Hero 说“手机上标题太挤”。系统先显示识别到的目标区块与拟修改内容，再执行；范围扩张、事实变化或目标冲突时先澄清。开发者可展开 Decision Ledger 查看 observation → decision → action → result，但不展示隐式思维链。
 
 ### 13.4 页面三：Component Lens
 
@@ -754,17 +815,20 @@ CodeAtlas 独立运行，使用它已有的 MySQL + Chroma 检索栈。SitePilot
 | EvidenceRecord | id、project_id、kind、source_ref、scope、version、validity | 所有检索、检查和人工确认都归一到此实体 |
 | HumanConfirmationEvidence | evidence_record_id、actor、question_id、answer、scope、goal_revision_id、confirmed_at | 人工回答必须带角色、时间和作用域 |
 | Requirement | id、statement、source_refs、status、risk | 无来源事实只能是 proposed |
+| RequirementBrief | id、project_id、goal_revision_id、audience、business_goal、conversion、locales、scope、constraints、missing_inputs、evidence_refs | 客户明确事实、可修改设计建议和未知项分开存储；修订生成新版本 |
 | Claim | id、draft_version_id、locale、page_path、field_path、text_hash、status | 页面中的每个事实声明均可独立验证 |
 | ClaimEvidence | claim_id、evidence_id、support_type、scope、validity | 只允许 support/contradict/context 三种关系 |
 | Conflict | id、claim_ids、evidence_ids、resolution、resolved_by | 未解决的阻断冲突不能进入 Approved |
 | AgentRun | id、project_id、budget、checkpoint、status | 可从最后成功节点恢复 |
 | AgentTask | id、run_id、role、input_refs、output_refs、lease、status | 子代理按固定角色和资源范围交接 |
 | SiteStrategy | id、project_id、version、goals、audiences、page_plan、design_direction、technical_tradeoffs、evidence_refs | 策略确认后冻结；修改创建新版本 |
+| DesignDraft | id、run_id、goal_revision_id、input_snapshot_id、page_tree、design_tokens、block_registry_version、open_questions、design_hash | 只引用允许的 Block Registry 组件；每次变更创建新 hash，不覆盖历史 |
+| CanvasPatch | id、design_draft_id、expected_design_hash、operations、actor、created_at | 仅允许 schema 化的 layout/props 修改；不包含任意 HTML/JS 或文件写入 |
 | ToolRun | id、tool、input_hash、output_refs、idempotency_key | 相同 key 不产生重复副作用 |
 | SourceSnapshot | id、repository_id、commit_sha、file_manifest_hash、quarantine_path_ref、verified_at | 只读隔离快照；不能用活动分支代替固定提交 |
 | RegistryCandidate | id、run_id、source_snapshot_id、schema_ref、code_artifact_id、status | 仅当前运行可见；晋升正式 Registry 创建新版本 |
 | CodeArtifact | id、run_id、base_commit、head_commit、patch_hash、lock_hash、source_manifest、build_ref | 代码产物只能来自授权 worktree，并可回放 |
-| CandidateRevision | id、run_id、parent_candidate_id、cms_snapshot、code_artifact_id、lock_hash、source_refs、candidate_hash | 每次代码/CMS 变更产生新候选；测试预览和 QA 绑定候选 hash |
+| CandidateRevision | id、run_id、parent_candidate_id、design_draft_id、cms_snapshot、code_artifact_id、lock_hash、source_refs、candidate_hash | 每次设计/代码/CMS 变更产生新候选；测试预览和 QA 绑定候选 hash |
 | DraftVersion | id、parent_id、candidate_id、candidate_hash、quality_snapshot_id、review_decision_id、preview_url、state | 构建/QA/Review 后创建；不可变，回滚只切换交付指针 |
 | QualityCheck | id、version_id、type、result、artifact_refs | 结果必须对应具体版本 |
 | Approval | id、version_id、actor、decision、reason、expires_at | 审批绑定版本 hash |
@@ -1245,95 +1309,72 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 
 ## 21. MVP、后续阶段与明确排除
 
-### 21.1 MVP 固定边界
+### 21.1 统一迭代原则与当前基线
 
-- 一个固定提交的 Payload Website Template 基线；
-- 一个包含基线区块和适配记录的 Block Registry，首批约 10–15 个区块；
-- Payload CMS 的页面、区块、locale、表单、SEO、draft/preview；
-- 三套合成客户包（V0 先用一套工业客户包）；
-- 14 类 Agent 工具，其中代码 worktree、固定源码获取、补丁、依赖和构建工具受 L2 策略控制；暂存快照检查为只读 L0；
-- 一个隔离预览环境；
-- CodeAtlas 只读 MCP；
-- V0 先覆盖 6 个确定性案例；完整 MVP 再扩展到 18 个模板、至少 90 个案例（60 development + 30 holdout）；
-- Architect、Research、Content/CMS、Coding、QA、Review 六类受限子代理；
-- V0 不发布生产、不推送远端 Git、不创建 PR；允许在隔离 worktree 本地写代码和提交；维护模式的限定 PR 能力另行验收；
-- 不执行未固定、未审查或来源不明的远程源码。
+接下来的项目按“先贯通一条客户可见的创建闭环，再扩大到生产与维护”推进。自然语言建站是当前产品主线；`cms-agent-platform-plan.md` 提供维护模式和共享工程内核的设计，不要求首轮同时交付 GitHub Issue 自动修复、PostHog、自托管整套监控或自动 PR。
 
-### 21.2 里程碑
+当前代码进度按 **PRD Draft 0.6** 推进；Draft 0.7 新增的是下一轮产品要求，不能把 0.7 的计划功能记成已实现。
 
-先做一条可演示的垂直切片，再扩展完整 MVP。以下时间是单人全职的粗估；加入多代理、代码沙箱和供应链审查后，原版估算不再适用。每个阶段只有满足出口标准才进入下一阶段。
+| 能力 | 当前经仓库/CI 记录的状态 | 本次迭代判断 |
+|---|---|---|
+| SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
+| Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
+| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有 SiteStrategy、PagePlan，以及不可变 DesignDraft/CanvasPatch API 和 Studio 反馈入口；真实模型驱动需求理解仍未完成 | 继续接入模型适配器与客户资料证据 |
+| Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
+| 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
+| GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |
 
-#### V0：端到端垂直切片（3–5 周，目标）
+CI 合成数据成功、代码模块存在或结构检查通过，均不等于自然语言建站功能已经完成。真实结果必须分别标注 fixture/真实 MCP、临时 CI 预览/客户预览、合成客户资料/授权资料。
 
-- 一个工业客户包的 3 个 Markdown/TXT 资料；
-- 首页、产品列表、联系页 3 个路由；
-- Hero、ProductGrid、ContactForm 3 个已登记区块；
-- CodeAtlas fixture adapter、管理员导入的项目 collection 与一次真实只读 MCP 查询；
-- Architect/Research/Coding/QA/Review 五个最小角色，Content/CMS 职责可由 Coding 在 V0 合并承担；
-- ingest_materials、retrieve_evidence、search_codeatlas、create_project_worktree、fetch_pinned_source、inspect_source_package、apply_code_patch、run_build_and_tests、create_payload_draft、run_quality_checks、package_review 十一个最小工具；
-- 一个动态分支：缺资料时停止；资料完整时选定来源、在隔离 worktree 修改至少一个页面或组件，构建并生成预览；
-- 桌面/移动截图、表单测试、来源清单、代码差异、证据引用与负责人批准。
+### 21.2 下一迭代：自然语言到可审阅设计草稿
 
-出口：在一台干净机器上使用 mock 模型和 CodeAtlas fixture/真实只读查询，从管理员导入回执到 Approved 预览完整跑通；能够展示一个有来源的本地代码补丁、构建与 QA 结果；无远端 Git 推送和生产发布工具。
+**目标：**客户给一句自然语言目标，不必先交 Figma，即可得到需求摘要、必要澄清、第一版可视化网页设计和可修改版本。当前轮先解决“看得见、能反馈”的设计入口，不同时引入 Issue 自动领取、生产部署或完整 CMS 内容运营。
 
-V0 不是另一套工具 API：使用上述正式名称和相同输入输出约束。资料由 CodeAtlas 管理台导入，`ingest_materials` 只核对回执；自动导入服务接口放到 M1。信息架构提案暂作为 Architect 的结构化规划结果，仍须通过 evidence/schema 校验；旧站巡检先使用自己生成的快照，不开放 inspect_public_site。完整 MVP 再增加 Content/CMS 专职角色、install_locked_dependencies、inspect_public_site 和 propose_information_architecture。M1 再扩展 PDF/DOCX/CSV、三套客户包和更大的评测集；Umami、案例页和交互筛选不是 V0 的出口条件。
+交付范围：
 
-#### M0：基础与安全（1–2 周，目标，与 V0 交叉）
+- 基于合成工业客户资料，支持自然语言创建项目并生成结构化 `RequirementBrief`；
+- 明确区分客户事实、待确认事实、Agent 的设计建议；每轮最多三个阻断问题；
+- Architect 产出 `SiteStrategy`、`PagePlan`、`DesignTokens`、responsive rules 和 `open_questions`；
+- 用 Hero、ProductGrid、ContactForm 等已审查区块生成 `DesignDraft`；
+- 对 Puck 做隔离技术验证：核验许可证、React/Next 兼容、受限区块渲染、序列化/恢复、Payload schema 映射与样式复用；验证通过才作为正式画布依赖，否则用轻量受控页面预览保持产品进度；
+- 画布/自然语言修改只生成 schema 校验过的 `CanvasPatch`，不执行任意 HTML/JS、不直接落盘源码；
+- 设计草稿版本、目标版本和证据版本冻结，可比较并复现。
 
-- 项目、角色、版本状态、策略和审计模型；
-- 三套合成客户包及 synthetic-data-lint；
-- 本地一键启动；
-- 工具 registry、schema 和幂等框架；
-- 证明远端推送/生产发布工具未注册、沙箱写入有路径隔离的测试。
+出口标准：从一条自然语言需求生成首页草稿；桌面和手机预览由同一组登记区块渲染；客户能提出至少一次自然语言修改，产生新的可审阅 `DesignDraft` 和差异；缺失产品参数不被编造；Puck 或替代方案选择有许可、兼容性和复现证据。
 
-出口：THR-01、THR-02、THR-03、THR-06 通过，InputSnapshot 与版本状态迁移测试通过。
+### 21.3 后续迭代：把设计接入 Payload 与真实代码候选
 
-#### M1：资料、RAG 与证据（1–2 周）
+- 将 DesignDraft 区块稳定映射为 Payload `pages.layout`，保留同一 React 区块渲染器，避免画布与最终站点视觉分叉；
+- 使用 CodeAtlas 固定 commit 检索组件、schema 和测试证据；通过许可/兼容检查后适配到项目 Registry；
+- 通过隔离 worktree 让 Coding Agent 对缺失组件和行为写 React/Payload 代码及测试；
+- 以 Payload sandbox 真实写入客户内容草稿，并把 design hash、代码 commit、锁文件、CMS snapshot 和来源清单绑为候选；
+- 在 GitHub Actions 或独立构建 runner 做依赖安装、构建和 Playwright QA，避免挤占 SitePilot/CodeAtlas 小型服务器资源；
+- 生成限定访问、可过期的预览地址与截图/报告；预览必须来自真实 Payload 候选，不能以 Puck mock 或静态 HTML 代替；
+- 出口：自然语言需求 → 设计 → 代码/CMS → 构建 → 浏览器验收 → 可打开预览的完整合成数据垂直切片。
 
-- CodeAtlas 受限服务端导入接口，collection/source hash/版本回执；
-- 复用 CodeAtlas 的 PDF/DOCX/XLSX/PPTX 结构化解析与统一检索；
-- SitePilot 的 EvidenceRecord、Claim、版本与失效传播映射；
-- EvidenceCard、需求/缺口/冲突界面；
-- 场景集基础标注。
+### 21.4 后续迭代：客户反馈、版本与交付
 
-出口：CodeAtlas 导入回执、collection 隔离和检索引用可回链；至少 30 个开发案例中 EvidenceRecord locator 可回链率 100%，冲突和失效传播测试通过。
+- 把客户反馈定位到需求、设计区块、CMS 字段、代码 diff 或 QA 问题；
+- 文案/顺序/已登记组件属性通过受限 patch；新交互或缺失能力由 Coding Agent 修改 worktree；
+- 每次修改创建不可变 child CandidateRevision；代码与 CMS 内容一起回滚；
+- 每次代码或 CMS 变化重跑受影响检查，旧 preview/QA 不能冒充新版本结果；
+- Review Theater 展示事实来源、许可、变更差异和质量报告；负责人批准 DraftVersion 后才成为当前交付预览；仍不自动发布生产。
 
-#### M2：多代理、代码工作区与 CodeAtlas（2–4 周，目标）
+### 21.5 生产化加固
 
-- LangGraph 动态循环、角色化 AgentTask、checkpoint、人审中断；
-- CodeAtlas 代码/文档只读工具 adapter；
-- 多代理结构化任务交接、Block Registry、兼容性和许可证据；
-- 项目隔离 worktree、固定来源获取、补丁与锁文件审计、构建资源限制；
-- Decision Ledger 与 Run Replay。
+- 明确授权客户资料处理、数据隔离/保留/删除、预览鉴权和访问过期；在进入真实客户试点前另做隐私和安全审查；
+- 将当前单实例状态存储、任务锁、日志、对象存储、备份恢复和构建队列变成经压力/恢复测试的部署方案；
+- 主服务只负责项目、任务和预览入口，CPU/内存密集的依赖安装、Payload 构建和浏览器 QA 放在 CI/专用 runner；
+- 完整核验类型检查、依赖/SBOM、开源 NOTICE、可观测性、故障恢复和升级/回滚流程；
+- 出口：在明确授权和数据隔离边界内完成小规模试点；仍需人工批准上线。
 
-出口：真实 MCP 与 fixture schema 一致；组合根因场景能产生至少两条不同且合规的路径；两个并发代理不能覆盖同一文件，来源代码可回链且无越界写入。
+### 21.6 持续维护模式（整合 cms-agent-platform-plan.md）
 
-#### M3：CMS 草稿与质量（2–3 周，目标）
+创建模式稳定后，再开放维护入口：GitHub Issue 或人工 Bug → allowlist/幂等校验 → lease 与固定 base SHA → 独立 worktree → 开发 Agent → 独立只读 Review → CI/浏览器门禁 → Human QA → 经仓库级授权创建 PR。PostHog 只在脱敏、fingerprint 去重、上下文足够且经人工/明确策略标记后产生候选 Issue；不直接触发生产修复。PR 不等于合并，合并、发布、迁移、删除继续由人工批准。该阶段复用创建模式的 AgentRun、工具契约、CodeAtlas、QualityCheck、审计与版本能力，不另建一套 RAG 或 Harness。
 
-- Payload Website Template 页面/区块/locale/表单/SEO 模型，以及隔离 worktree 的代码适配与构建；
-- Playwright、Lighthouse、链接与表单检查；
-- 版本、差异、回滚和预览 URL。
+本地演示和离线测试可用固定模型/CodeAtlas fixture/合成资料；所有 Mock 必须在界面、trace 和报告中显式标记。线上动作、客户数据和公开预览不得由 fixture 结果替代。
 
-出口：三个固定视口、关键表单和版本回滚通过；unknown_commit 故障注入不产生重复草稿。
-
-#### M4：界面、评测和硬化（1 周）
-
-- Evidence Canvas 四个核心工作区；
-- 18 个模板、至少 90 个案例的冻结评测；
-- 指标报告、SOURCES.md、NOTICE、README、威胁模型；
-- fresh-reader 审查与演示彩排。
-
-出口：30 个冻结 holdout 案例与恢复压力测试形成可复现报告；README 在干净环境通过。
-
-本地一键启动包括 CodeAtlas（按其 MySQL/Chroma 依赖启动）、Payload Website Template、SitePilot API/worker、对象存储模拟器与预览服务。无网络/无 API key 时使用固定模型响应、CodeAtlas fixture、管理员导入回执 fixture；所有 mock 在 UI、trace 和报告中明确标记，不能与真实实测混合。
-
-### 21.3 后续阶段
-
-- P1：更多经过来源审查的模板与组件、视觉回归、内容审批 SLA、按领域扩展字段模型。
-- P2：经双人审批的 staging 发布、与工单/设计工具集成、团队策略模板。
-- P3：在真实授权数据上做小规模试点；必须另行完成隐私、合同和安全评审。
-
-### 21.4 明确排除
+### 21.7 明确排除
 
 - 生产发布和真实客户分析账户；
 - 私有仓库、任职公司模板、内部 CMS；
@@ -1487,9 +1528,9 @@ Mode 只允许 dependency、copied-with-modification、API-consumer、reference-
 
 ## 27. 开发就绪定义
 
-PRD 进入开发前必须确认：
+一个里程碑进入实现前必须确认：
 
-- 14 类工具的 JSON Schema、风险等级、超时、预算和幂等规则均已评审。
+- 当前里程碑启用工具的 JSON Schema、风险等级、超时、预算和幂等规则均已评审；完整 MVP 工具目录为 16 类。
 - Block Registry 首批区块和固定 commit 已选定，媒体资产许可已清理。
 - Payload collections 与 DraftVersion 映射已形成技术设计。
 - 三套合成客户包至少有第一版 manifest。
@@ -1500,7 +1541,7 @@ PRD 进入开发前必须确认：
 
 ## 28. 最终产品判断
 
-SitePilot 的核心不是“再做一个官网生成器”，而是把官网策略、证据、RAG、开源代码复用、多代理编码、沙箱 CMS 和质量验证串成可审阅闭环。CodeAtlas 作为独立代码与文档知识库，提供解析、索引与只读检索；V0 管理员导入资料，M1 评估并补受限服务接口。SitePilot 通过 MCP 消费代码和内容证据，自身维护隔离代码工作区、业务 Claim、版本与审批。
+SitePilot 是同一工程内核上的官网创建与持续维护平台：当前优先把自然语言需求推进到设计草稿、组件/代码实现、Payload 真实预览和客户反馈迭代；后续吸收 `cms-agent-platform-plan.md` 的 GitHub Issue、隔离 worktree、独立 Review、PR 人工验收与可选线上错误入口。CodeAtlas 仍作为独立代码与文档知识库提供解析、索引与只读检索；SitePilot 自己维护项目隔离、来源证据、版本、质量、审批和共享编排，不把两个模式混成一条一次性流水线。
 
 真正体现 Agent 开发能力的是：
 

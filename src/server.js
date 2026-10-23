@@ -189,6 +189,35 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.persist?.();
         return send(res, 201, revised);
       }
+      const designDraftMatch = url.pathname.match(/^\/runs\/([^/]+)\/design-drafts$/);
+      if (req.method === "POST" && designDraftMatch) {
+        const run = store.runs.get(designDraftMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+        const draft = store.createDesignDraft(run.id, await readJson(req));
+        store.persist?.();
+        return send(res, 201, draft);
+      }
+      const runDesignsMatch = url.pathname.match(/^\/runs\/([^/]+)\/design-drafts$/);
+      if (req.method === "GET" && runDesignsMatch) {
+        const run = store.runs.get(runDesignsMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        return send(res, 200, { designs: (run.designDraftIds || []).map((id) => store.designs.get(id)).filter(Boolean) });
+      }
+      const designPatchMatch = url.pathname.match(/^\/design-drafts\/([^/]+)\/patches$/);
+      if (req.method === "POST" && designPatchMatch) {
+        const design = store.designs.get(designPatchMatch[1]);
+        if (!design) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const input = await readJson(req);
+        const result = store.applyDesignPatch(design.id, { ...input, actor: input.actor || "api-operator" });
+        store.persist?.();
+        return send(res, 201, result);
+      }
+      const designPatchesMatch = url.pathname.match(/^\/design-drafts\/([^/]+)\/patches$/);
+      if (req.method === "GET" && designPatchesMatch) {
+        if (!store.designs.has(designPatchesMatch[1])) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        return send(res, 200, { patches: [...store.canvasPatches.values()].filter((patch) => patch.designDraftId === designPatchesMatch[1]) });
+      }
       const researchMatch = url.pathname.match(/^\/runs\/([^/]+)\/research$/);
       if (req.method === "POST" && researchMatch) {
         if (!codeAtlas || typeof codeAtlas.search !== "function") return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
@@ -292,7 +321,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

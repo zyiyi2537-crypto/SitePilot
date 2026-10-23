@@ -20,13 +20,15 @@ export class JsonSitePilotStore extends SitePilotStore {
     for (const [key, value] of Object.entries(data.projects || {})) this.projects.set(key, value);
     for (const [key, value] of Object.entries(data.runs || {})) this.runs.set(key, value);
     for (const [key, value] of Object.entries(data.tasks || {})) this.tasks.set(key, value);
+    for (const [key, value] of Object.entries(data.designs || {})) this.designs.set(key, value);
+    for (const [key, value] of Object.entries(data.canvasPatches || {})) this.canvasPatches.set(key, value);
     for (const [key, value] of Object.entries(data.candidates || {})) this.candidates.set(key, value);
     for (const [key, value] of Object.entries(data.drafts || {})) this.drafts.set(key, value);
     this.audit = Array.isArray(data.audit) ? data.audit : [];
   }
 
   persist() {
-    const payload = JSON.stringify({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit }, null, 2);
+    const payload = JSON.stringify({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), designs: mapObject(this.designs), canvasPatches: mapObject(this.canvasPatches), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit }, null, 2);
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const temp = `${this.file}.tmp-${process.pid}`;
     fs.writeFileSync(temp, payload, { encoding: "utf8", mode: 0o600 });
@@ -37,6 +39,8 @@ export class JsonSitePilotStore extends SitePilotStore {
   createRun(...args) { const value = super.createRun(...args); this.persist(); return value; }
   task(...args) { const value = super.task(...args); this.persist(); return value; }
   completeTask(...args) { const value = super.completeTask(...args); this.persist(); return value; }
+  createDesignDraft(...args) { const value = super.createDesignDraft(...args); this.persist(); return value; }
+  applyDesignPatch(...args) { const value = super.applyDesignPatch(...args); this.persist(); return value; }
   createCandidate(...args) { const value = super.createCandidate(...args); this.persist(); return value; }
   markQuality(...args) { const value = super.markQuality(...args); this.persist(); return value; }
   packageReview(...args) { const value = super.packageReview(...args); this.persist(); return value; }
@@ -46,19 +50,21 @@ export class JsonSitePilotStore extends SitePilotStore {
 export class SqliteSitePilotStore extends SitePilotStore {
   constructor(file) {
     super();
-    this.state = new SqliteState(file, "core", { projects: {}, runs: {}, tasks: {}, candidates: {}, drafts: {}, audit: [] });
-    for (const name of ["projects", "runs", "tasks", "candidates", "drafts"]) {
+    this.state = new SqliteState(file, "core", { projects: {}, runs: {}, tasks: {}, designs: {}, canvasPatches: {}, candidates: {}, drafts: {}, audit: [] });
+    for (const name of ["projects", "runs", "tasks", "designs", "canvasPatches", "candidates", "drafts"]) {
       for (const [id, value] of Object.entries(this.state.data[name] || {})) this[name].set(id, value);
     }
     this.audit = this.state.data.audit || [];
   }
   persist() {
-    this.state.save({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit });
+    this.state.save({ projects: mapObject(this.projects), runs: mapObject(this.runs), tasks: mapObject(this.tasks), designs: mapObject(this.designs), canvasPatches: mapObject(this.canvasPatches), candidates: mapObject(this.candidates), drafts: mapObject(this.drafts), audit: this.audit });
   }
   createProject(input) { const value = super.createProject(input); this.persist(); return value; }
   createRun(...args) { const value = super.createRun(...args); this.persist(); return value; }
   task(...args) { const value = super.task(...args); this.persist(); return value; }
   completeTask(...args) { const value = super.completeTask(...args); this.persist(); return value; }
+  createDesignDraft(...args) { const value = super.createDesignDraft(...args); this.persist(); return value; }
+  applyDesignPatch(...args) { const value = super.applyDesignPatch(...args); this.persist(); return value; }
   createCandidate(...args) { const value = super.createCandidate(...args); this.persist(); return value; }
   markQuality(...args) { const value = super.markQuality(...args); this.persist(); return value; }
   packageReview(...args) { const value = super.packageReview(...args); this.persist(); return value; }

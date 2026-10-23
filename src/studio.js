@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 const node = (tag, text, className) => { const item = document.createElement(tag); if (text !== undefined) item.textContent = String(text); if (className) item.className = className; return item; };
 let projectId = null;
 let runId = null;
+let designDraft = null;
 
 function notice(message, error = false) {
   const target = $("#notice");
@@ -50,6 +51,8 @@ async function showRun() {
   target.replaceChildren();
   if (!runId) { target.textContent = "此项目尚无 Run。"; return; }
   const run = await api("GET", `/runs/${encodeURIComponent(runId)}`);
+  const designResult = await api("GET", `/runs/${encodeURIComponent(runId)}/design-drafts`);
+  designDraft = designResult.designs.at(-1) || null;
   const details = node("dl");
   for (const [label, value] of [["Run", run.id], ["状态", run.checkpoint], ["策略", run.strategy?.strategy || "待生成"], ["页面", (run.strategy?.pageHierarchy || []).join(", ")]]) {
     details.append(node("dt", label), node("dd", value));
@@ -78,6 +81,35 @@ async function showRun() {
   $("#research-status").textContent = run.research ? `${run.research.repository} @ ${run.research.commit}，${run.research.evidence.length} 条证据` : "尚未检索组件";
   $("#plan-output").hidden = !run.pagePlan;
   if (run.pagePlan) $("#plan-output").textContent = JSON.stringify({ routes: run.pagePlan.routes.map(({ route, file, components }) => ({ route, file, components: components.map(({ name }) => name) })), sourceManifestHash: run.pagePlan.sourceManifestHash }, null, 2);
+  $("#create-design").disabled = !run.pagePlan;
+  renderDesignDraft();
+}
+
+function renderDesignDraft() {
+  const target = $("#design-preview");
+  const status = $("#design-status");
+  const feedback = $("#feedback-form");
+  target.replaceChildren();
+  if (!designDraft) {
+    status.textContent = "页面计划生成后创建首版设计。";
+    target.textContent = "设计草稿会在这里显示。";
+    feedback.hidden = true;
+    return;
+  }
+  status.textContent = `版本 ${designDraft.id} · hash ${designDraft.designHash.slice(0, 12)} · ${designDraft.openQuestions.length} 个待确认项`;
+  for (const page of designDraft.pageTree) {
+    const card = node("article", undefined, "design-page");
+    card.append(node("h3", `${page.page} · ${page.route}`));
+    const list = node("ol");
+    for (const component of page.components) {
+      const item = node("li", `${component.name} · ${component.instanceId}`);
+      const props = Object.keys(component.props || {}).length ? `属性：${JSON.stringify(component.props)}` : "默认属性";
+      item.append(node("small", props, "muted"));
+      list.append(item);
+    }
+    card.append(list); target.append(card);
+  }
+  feedback.hidden = false;
 }
 
 function checkbox(text) { const label = node("label"); const input = node("input"); input.type = "checkbox"; label.append(input, document.createTextNode(text)); return { label, input }; }
@@ -117,3 +149,20 @@ $("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-v
 $("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => { const form = new FormData(event.target); const input = Object.fromEntries(form); input.contentAvailable = input.contentAvailable.split(",").map((value) => value.trim()).filter(Boolean); const project = await api("POST", "/projects", input); projectId = project.id; const run = await api("POST", `/projects/${encodeURIComponent(project.id)}/runs`, {}); runId = run.id; await loadProjects(); event.target.reset(); }); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };
 $("#create-plan").onclick = () => action(async () => { if (!runId) throw new Error("请先选择项目 Run"); await api("POST", `/runs/${encodeURIComponent(runId)}/page-plan`, {}); await showRun(); });
+$("#create-design").onclick = () => action(async () => {
+  if (!runId) throw new Error("请先选择项目 Run");
+  await api("POST", `/runs/${encodeURIComponent(runId)}/design-drafts`, {});
+  await showRun();
+});
+$("#feedback-form").onsubmit = (event) => { event.preventDefault(); action(async () => {
+  if (!designDraft) throw new Error("请先创建设计草稿");
+  const feedback = $("#design-feedback").value.trim();
+  let props;
+  try { props = JSON.parse($("#design-props").value); } catch { throw new Error("属性补丁必须是 JSON 对象"); }
+  if (!props || typeof props !== "object" || Array.isArray(props)) throw new Error("属性补丁必须是 JSON 对象");
+  const page = designDraft.pageTree[0]; const component = page?.components[0];
+  if (!component) throw new Error("当前设计没有可修改的组件");
+  await api("POST", `/design-drafts/${encodeURIComponent(designDraft.id)}/patches`, { expectedDesignHash: designDraft.designHash, feedback, operations: [{ op: "set_props", page: page.page, componentId: component.instanceId, props }] });
+  $("#design-feedback").value = "";
+  await showRun();
+}); };

@@ -114,6 +114,29 @@ test("strategy asks for missing customer inputs", () => {
   assert.equal(complete.primaryConversion, "book a demo");
 });
 
+test("design drafts are immutable and canvas patches are schema constrained", () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "industrial website", industry: "industrial" });
+  const run = store.createRun(project.id);
+  run.pagePlan = {
+    routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "block_hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }],
+  };
+  const first = store.createDesignDraft(run.id, { openQuestions: [{ field: "brand", question: "Which brand color?" }] });
+  assert.equal(first.pageTree[0].components[0].registryId, "block_hero");
+  const updated = store.applyDesignPatch(first.id, {
+    expectedDesignHash: first.designHash,
+    feedback: "Make the hero more compact on mobile",
+    operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: { density: "compact", mobileTitleSize: "sm" } }],
+  });
+  assert.notEqual(updated.draft.id, first.id);
+  assert.notEqual(updated.draft.designHash, first.designHash);
+  assert.equal(updated.patch.affectedRoutes[0], "/");
+  assert.equal(store.designs.get(first.id).designHash, first.designHash);
+  assert.throws(() => store.applyDesignPatch(updated.draft.id, { expectedDesignHash: "stale", operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: {} }] }), /does not match/);
+  assert.throws(() => store.applyDesignPatch(updated.draft.id, { expectedDesignHash: updated.draft.designHash, operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: { html: "<script>alert(1)</script>" } }] }), /Invalid design property|executable markup/);
+  assert.throws(() => store.applyDesignPatch(updated.draft.id, { expectedDesignHash: updated.draft.designHash, operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: JSON.parse('{"__proto__":{"polluted":true}}') }] }), /Invalid design property|executable markup/);
+});
+
 test("candidate cannot become draft before quality and review", () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "test", industry: "general" });
@@ -485,6 +508,21 @@ test("JSON store recovers projects and runs", () => {
   const second = new JsonSitePilotStore(file);
   assert.equal(second.projects.get(project.id).goal, "persist me");
   assert.equal(second.runs.get(run.id).projectId, project.id);
+});
+
+test("JSON store recovers immutable design revisions and patches", () => {
+  const file = `/tmp/sitepilot-design-${crypto.randomUUID()}.json`;
+  const first = new JsonSitePilotStore(file);
+  const project = first.createProject({ goal: "design recovery" });
+  const run = first.createRun(project.id);
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "r", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const draft = first.createDesignDraft(run.id);
+  const next = first.applyDesignPatch(draft.id, { expectedDesignHash: draft.designHash, operations: [{ op: "set_props", page: "home", componentId: "home:hero:0", props: { density: "compact" } }] });
+  const second = new JsonSitePilotStore(file);
+  assert.equal(second.designs.get(draft.id).designHash, draft.designHash);
+  assert.equal(second.designs.get(next.draft.id).parentId, draft.id);
+  assert.equal(second.canvasPatches.get(next.patch.id).nextDesignDraftId, next.draft.id);
+  fsSync.rmSync(file, { force: true });
 });
 
 test("delivery orchestrator stops failed QA before review", async () => {
