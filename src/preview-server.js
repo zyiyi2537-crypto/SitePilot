@@ -8,9 +8,16 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
 }
 
-function renderPage(route) {
-  const components = route.components.map((component) => `<section data-component="${escapeHtml(component.name)}"><h2>${escapeHtml(component.name)}</h2><p>Candidate component preview. Source: <code>${escapeHtml(component.source.repository)}@${escapeHtml(component.source.commit.slice(0, 12))}:${escapeHtml(component.source.path)}</code></p>${component.name === "ContactForm" ? '<form><label>Email <input type="email" required></label><button type="submit">Send inquiry</button></form>' : ""}</section>`).join("");
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(route.page)} | SitePilot preview</title><style>body{font:16px system-ui;max-width:960px;margin:40px auto;padding:0 20px;color:#18212b}section{border:1px solid #d0d7de;padding:24px;margin:20px 0}code{color:#536273;overflow-wrap:anywhere}a{color:#0969da}input,button{font:inherit;padding:8px;margin:8px 0}label{display:grid;max-width:420px}</style></head><body><p><a href="/">SitePilot preview</a></p><h1>${escapeHtml(route.page)}</h1><p>Candidate page structure, not a production release.</p>${components}</body></html>`;
+function renderPage(route, design = null) {
+  const designPage = design?.pageTree?.find((page) => page.page === route.page && page.route === route.route);
+  const componentById = new Map((designPage?.components || []).map((component) => [component.registryId, component]));
+  const components = route.components.map((component) => {
+    const designComponent = componentById.get(component.registryId);
+    const props = designComponent?.props && Object.keys(designComponent.props).length ? `<details><summary>Design properties</summary><pre>${escapeHtml(JSON.stringify(designComponent.props, null, 2))}</pre></details>` : "";
+    return `<section data-component="${escapeHtml(component.name)}" data-design-instance="${escapeHtml(designComponent?.instanceId || "")}"><h2>${escapeHtml(component.name)}</h2><p>Candidate component preview. Source: <code>${escapeHtml(component.source.repository)}@${escapeHtml(component.source.commit.slice(0, 12))}:${escapeHtml(component.source.path)}</code></p>${props}${component.name === "ContactForm" ? '<form><label>Email <input type="email" required></label><button type="submit">Send inquiry</button></form>' : ""}</section>`;
+  }).join("");
+  const designMeta = design ? `<p data-sitepilot-design-hash="${escapeHtml(design.designHash)}">Design revision: <code>${escapeHtml(design.id)}</code></p>` : "<p>Page plan preview; no design revision attached.</p>";
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(route.page)} | SitePilot preview</title><style>body{font:16px system-ui;max-width:960px;margin:40px auto;padding:0 20px;color:#18212b}section{border:1px solid #d0d7de;padding:24px;margin:20px 0}code{color:#536273;overflow-wrap:anywhere}a{color:#0969da}input,button{font:inherit;padding:8px;margin:8px 0}label{display:grid;max-width:420px}details{margin-top:12px}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6f8;padding:10px}</style></head><body><p><a href="/">SitePilot preview</a></p><h1>${escapeHtml(route.page)}</h1><p>Candidate page structure, not a production release.</p>${designMeta}${components}</body></html>`;
 }
 
 export class LocalPreviewServer {
@@ -42,7 +49,7 @@ export class LocalPreviewServer {
         return response.end("Preview route not found");
       }
       response.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
-      response.end(renderPage(route));
+      response.end(renderPage(route, this.plan.design));
     });
     await new Promise((resolve, reject) => {
       this.server.once("error", reject);

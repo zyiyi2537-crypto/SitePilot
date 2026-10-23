@@ -8,7 +8,7 @@ function hashRoutes(routes) {
   return crypto.createHash("sha256").update(JSON.stringify(routes)).digest("hex");
 }
 
-export async function validateGeneratedCandidate({ worktreeRoot } = {}) {
+export async function validateGeneratedCandidate({ worktreeRoot, expectedDesignHash } = {}) {
   if (!worktreeRoot || !path.isAbsolute(worktreeRoot)) throw new PolicyError("Build worktree root must be absolute", "POLICY_DENIED");
   const root = path.resolve(worktreeRoot);
   const manifestPath = path.join(root, "src/generated/sitepilot-manifest.json");
@@ -20,6 +20,9 @@ export async function validateGeneratedCandidate({ worktreeRoot } = {}) {
   }
   if (!Array.isArray(manifest.routes) || !manifest.sourceManifestHash || hashRoutes(manifest.routes) !== manifest.sourceManifestHash) {
     throw new PolicyError("Generated candidate manifest hash is invalid", "BUILD_FAILED");
+  }
+  if (expectedDesignHash && manifest.design?.designHash !== expectedDesignHash) {
+    throw new PolicyError("Generated candidate design hash is invalid", "BUILD_FAILED");
   }
   const missingFiles = [];
   for (const route of manifest.routes) {
@@ -35,5 +38,5 @@ export async function validateGeneratedCandidate({ worktreeRoot } = {}) {
     }
   }
   if (missingFiles.length) throw new PolicyError(`Generated candidate files are missing or invalid: ${missingFiles.join(", ")}`, "BUILD_FAILED");
-  return Object.freeze({ passed: true, check: "generated-candidate", routeCount: manifest.routes.length, sourceManifestHash: manifest.sourceManifestHash });
+  return Object.freeze({ passed: true, check: "generated-candidate", routeCount: manifest.routes.length, sourceManifestHash: manifest.sourceManifestHash, designHash: manifest.design?.designHash || null });
 }

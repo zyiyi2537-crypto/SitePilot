@@ -247,6 +247,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         if (run.status === "superseded") return send(res, 409, { code: "RUN_SUPERSEDED" });
         if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+        const designDraft = run.designDraftId ? store.designs.get(run.designDraftId) : null;
+        if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
         if (run.candidateIds.length || generatingRuns.has(run.id)) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
         for (const route of run.pagePlan.routes) for (const component of route.components) {
           const approved = registry.blocks.get(component.registryId);
@@ -261,12 +263,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const worktree = new WorktreePolicy(root);
         const generated = await materializePagePlan({
           plan: run.pagePlan,
+          designDraft,
           worktree,
           grant: { level: "L2" },
           sourceResolver: (source) => codeAtlas.getCompleteFile({ ...source, expectedCommit: source.commit }),
         });
-        const build = await validateGeneratedCandidate({ worktreeRoot: root });
-        const candidate = store.createCandidate(run.id, { codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted" }, sourceRefs: run.research?.evidence || [] });
+        const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
+        const candidate = store.createCandidate(run.id, { designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, sourceRefs: run.research?.evidence || [] });
         candidate.build = build;
         run.checkpoint = "candidate_ready";
         store.persist?.();

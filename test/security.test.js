@@ -150,6 +150,8 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
   const plan = await request(server, "POST", `/runs/${run.id}/page-plan`, token, {});
   assert.equal(plan.status, 200);
+  const design = await request(server, "POST", `/runs/${run.id}/design-drafts`, token, {});
+  assert.equal(design.status, 201);
   assert.equal((await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: "missing" })).status, 422);
   const unknown = await request(server, "POST", `/runs/${run.id}/grants`, "b".repeat(32), { tool: "other_tool", expiresAt: new Date(Date.now() + 60_000).toISOString() });
   assert.equal(unknown.status, 422);
@@ -162,6 +164,42 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(generated.body.build.passed, true);
   assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
   assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
+  assert.equal(generated.body.candidate.designDraftId, design.body.id);
+  assert.equal(generated.body.candidate.codeArtifact.designHash, design.body.designHash);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+test("generation binds candidates to the latest design revision", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const reviewerToken = "b".repeat(32);
+  const l2Token = "c".repeat(32);
+  const registry = new BlockRegistry();
+  const commit = "e".repeat(40);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const root = await fs.mkdtemp("/tmp/sitepilot-latest-design-");
+  const codeAtlas = { getCompleteFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
+  const server = createServer(store, { apiToken: token, reviewerToken, reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact" });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  assert.equal((await request(server, "POST", `/runs/${run.id}/page-plan`, token, {})).status, 200);
+  const first = await request(server, "POST", `/runs/${run.id}/design-drafts`, token, {});
+  assert.equal(first.status, 201);
+  const heroInstanceId = first.body.pageTree[0].components[0].instanceId;
+  const patched = await request(server, "POST", `/design-drafts/${first.body.id}/patches`, token, {
+    expectedDesignHash: first.body.designHash,
+    operations: [{ op: "set_props", page: "home", componentId: heroInstanceId, props: { density: "compact" } }],
+  });
+  assert.equal(patched.status, 201);
+  assert.notEqual(patched.body.draft.id, first.body.id);
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const generated = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: grant.body.id });
+  assert.equal(generated.status, 201);
+  assert.equal(generated.body.candidate.designDraftId, patched.body.draft.id);
+  assert.equal(generated.body.candidate.codeArtifact.designHash, patched.body.draft.designHash);
+  assert.notEqual(generated.body.candidate.designDraftId, first.body.id);
   await fs.rm(root, { recursive: true, force: true });
 });
 
@@ -304,6 +342,29 @@ test("local preview is localhost-only and read-only", () => {
   assert.throws(() => new LocalPreviewServer({ plan, host: "0.0.0.0" }), /localhost/);
 });
 
+test("local preview exposes the bound design revision and component props", async () => {
+  const preview = new LocalPreviewServer({ plan: {
+    design: {
+      id: "design_preview_1",
+      designHash: "hash_preview_1",
+      pageTree: [{ page: "home", route: "/", components: [{ instanceId: "home:block_hero:0", registryId: "block_hero", props: { density: "compact" } }] }],
+    },
+    routes: [{ route: "/", page: "home", components: [{ name: "Hero", registryId: "block_hero", source: { repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx" } }] }],
+  } });
+  const address = await preview.listen();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/`);
+    const html = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(html, /data-sitepilot-design-hash="hash_preview_1"/);
+    assert.match(html, /design_preview_1/);
+    assert.match(html, /&quot;density&quot;: &quot;compact&quot;/);
+    assert.match(html, /data-design-instance="home:block_hero:0"/);
+  } finally {
+    await preview.close();
+  }
+});
+
 test("Playwright QA visits local preview and binds it to candidate hash", async (t) => {
   try { await fs.access("/usr/bin/google-chrome"); } catch { return t.skip("Chrome is unavailable"); }
   const preview = new LocalPreviewServer({ plan: { routes: [{ route: "/", page: "home", components: [] }] } });
@@ -328,11 +389,13 @@ test("local build gate validates generated manifest and page files", async () =>
   const routes = [{ page: "home", route: "/", file: "src/app/(site)/home/page.tsx", components: [] }];
   const crypto = await import("node:crypto");
   const sourceManifestHash = crypto.createHash("sha256").update(JSON.stringify(routes)).digest("hex");
-  await fs.writeFile(`${root}/src/generated/sitepilot-manifest.json`, JSON.stringify({ routes, sourceManifestHash }));
+  await fs.writeFile(`${root}/src/generated/sitepilot-manifest.json`, JSON.stringify({ routes, sourceManifestHash, design: { id: "design_1", designHash: "hash_1" } }));
   await fs.writeFile(`${root}/src/app/(site)/home/page.tsx`, '<main data-sitepilot-page="home" />');
-  const result = await validateGeneratedCandidate({ worktreeRoot: root });
+  const result = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: "hash_1" });
   assert.equal(result.passed, true);
   assert.equal(result.routeCount, 1);
+  assert.equal(result.designHash, "hash_1");
+  await assert.rejects(() => validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: "stale_hash" }), /design hash is invalid/);
   await fs.rm(root, { recursive: true, force: true });
 });
 
