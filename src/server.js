@@ -101,11 +101,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
-      if (req.method === "GET" && ["/studio", "/studio.css", "/studio-delivery.css", "/studio.js"].includes(url.pathname)) {
-        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio-delivery.css": "studio-delivery.css", "/studio.js": "studio.js" }[url.pathname];
+      if (req.method === "GET" && ["/studio", "/studio.css", "/studio-delivery.css", "/studio.js", "/design-preview.js"].includes(url.pathname)) {
+        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio-delivery.css": "studio-delivery.css", "/studio.js": "studio.js", "/design-preview.js": "design-preview.js" }[url.pathname];
         const type = file.endsWith("html") ? "text/html" : file.endsWith("css") ? "text/css" : "text/javascript";
         const content = await fs.readFile(new URL(`./${file}`, import.meta.url));
-        res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'self'", "cache-control": "no-store", "x-content-type-options": "nosniff" });
+        res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' data:; connect-src 'self'; img-src 'self'; frame-src blob:; base-uri 'none'; form-action 'self'", "cache-control": "no-store", "x-content-type-options": "nosniff" });
         return res.end(content);
       }
       if (req.method === "GET" && url.pathname === "/health") return send(res, 200, { status: "ok", service: "sitepilot" });

@@ -1,3 +1,5 @@
+import { renderDesignPreviewDocument, renderDesignPreviewStylesheet } from "./design-preview.js";
+
 const $ = (selector) => document.querySelector(selector);
 const node = (tag, text, className) => { const item = document.createElement(tag); if (text !== undefined) item.textContent = String(text); if (className) item.className = className; return item; };
 let projectId = null;
@@ -7,6 +9,11 @@ let currentRun = null;
 let currentCandidate = null;
 let currentPreview = null;
 let intakePreview = null;
+let selectedDesignPage = "";
+let selectedDesignComponent = "";
+let designViewport = "desktop";
+let activePreviewUrls = new Set();
+const previewUrls = new Set();
 
 function notice(message, error = false) {
   const target = $("#notice");
@@ -178,33 +185,91 @@ function renderDesignDraft() {
     feedback.hidden = true;
     return;
   }
-  status.textContent = `版本 ${designDraft.id} · hash ${designDraft.designHash.slice(0, 12)} · ${designDraft.openQuestions.length} 个待确认项`;
+  const pages = designDraft.pageTree || [];
+  if (!pages.some((page) => page.page === selectedDesignPage)) selectedDesignPage = pages[0]?.page || "";
+  const page = pages.find((item) => item.page === selectedDesignPage) || pages[0];
+  if (!page) return;
+  const revision = Math.max(1, (currentRun?.designDraftIds || []).indexOf(designDraft.id) + 1);
+  status.textContent = `版本 ${revision} · hash ${designDraft.designHash.slice(0, 12)} · ${designDraft.openQuestions.length} 个待确认项${designDraft.parentId ? ` · 基于 ${designDraft.parentId}` : ""}`;
+
+  const preview = node("div", undefined, "design-preview-layout");
+  const canvas = node("div", undefined, "design-preview-canvas");
+  const toolbar = node("div", undefined, "design-preview-toolbar");
+  const pageLabel = node("label", "页面", "preview-page-picker");
+  const pageSelect = node("select"); pageSelect.id = "design-page-select";
+  for (const item of pages) {
+    const option = node("option", `${item.page} · ${item.route}`); option.value = item.page; option.selected = item.page === page.page; pageSelect.append(option);
+  }
+  pageSelect.onchange = () => { selectedDesignPage = pageSelect.value; selectedDesignComponent = ""; renderDesignDraft(); };
+  pageLabel.append(pageSelect); toolbar.append(pageLabel);
+  const viewportControl = node("div", undefined, "preview-viewport-control");
+  viewportControl.setAttribute("role", "group"); viewportControl.setAttribute("aria-label", "预览尺寸");
+  for (const [value, label] of [["desktop", "桌面"], ["tablet", "平板"], ["mobile", "手機"]]) {
+    const button = node("button", label); button.type = "button"; button.setAttribute("aria-pressed", String(designViewport === value));
+    button.onclick = () => { designViewport = value; frame.className = `design-preview-frame ${designViewport}`; for (const option of viewportControl.querySelectorAll("button")) option.setAttribute("aria-pressed", String(option.textContent === label)); };
+    viewportControl.append(button);
+  }
+  toolbar.append(viewportControl);
+  const stage = node("div", undefined, "design-preview-stage");
+  const frame = node("iframe"); frame.id = "design-preview-frame"; frame.className = `design-preview-frame ${designViewport}`; frame.title = `${page.page} 设计预览`; frame.setAttribute("sandbox", "");
+  const locale = currentRun?.inputSnapshot?.locale?.[0] || "zh-CN";
+  const documentHtml = renderDesignPreviewDocument({
+    designDraft,
+    page: page.page,
+    locale,
+    industry: currentRun?.inputSnapshot?.industry,
+    audience: currentRun?.strategy?.audience,
+    primaryConversion: currentRun?.strategy?.primaryConversion,
+    businessGoal: currentRun?.strategy?.businessGoal,
+  });
+  const stylesheetUrl = `data:text/css;charset=utf-8,${encodeURIComponent(renderDesignPreviewStylesheet({ designDraft }))}`;
+  const previewHtml = documentHtml.replace("__SITEPILOT_PREVIEW_STYLESHEET__", stylesheetUrl);
+  const nextUrl = URL.createObjectURL(new Blob([previewHtml], { type: "text/html;charset=utf-8" }));
+  const currentUrls = new Set([nextUrl]);
+  previewUrls.add(nextUrl); activePreviewUrls = currentUrls;
+  frame.onload = () => {
+    for (const url of previewUrls) if (!activePreviewUrls.has(url)) { URL.revokeObjectURL(url); previewUrls.delete(url); }
+  };
+  frame.src = nextUrl;
+  stage.append(frame); canvas.append(toolbar, stage);
+
+  const sidebar = node("aside", undefined, "design-preview-sidebar");
   const tokens = designDraft.designTokens || {};
-  const summary = node("article", undefined, "design-summary");
+  const summary = node("section", undefined, "design-summary");
   summary.append(node("strong", "视觉方向"), node("p", currentRun?.strategy?.designDirection || "等待视觉方向"));
   const palette = node("div", undefined, "design-palette");
   for (const [key, label] of [["primary", "主色"], ["surface", "底色"], ["text", "文字"]]) {
     const value = tokens.color?.[key];
     if (!value) continue;
-    const swatch = node("span", undefined, "design-swatch");
-    swatch.style.backgroundColor = value;
-    swatch.setAttribute("aria-label", `${label} ${value}`);
+    const swatch = node("input", undefined, "design-swatch"); swatch.type = "color"; swatch.value = value; swatch.disabled = true; swatch.setAttribute("aria-label", `${label} ${value}`);
     palette.append(swatch, node("small", `${label} ${value}`));
   }
   summary.append(palette, node("small", `区块间距 ${tokens.spacing?.section ?? "默认"} px · 字体 ${tokens.typography?.heading || "默认"}`, "muted"));
-  target.append(summary);
-  for (const page of designDraft.pageTree) {
-    const card = node("article", undefined, "design-page");
-    card.append(node("h3", `${page.page} · ${page.route}`));
-    const list = node("ol");
-    for (const component of page.components) {
-      const item = node("li", `${component.name} · ${component.instanceId}`);
-      const props = Object.keys(component.props || {}).length ? `属性：${JSON.stringify(component.props)}` : "默认属性";
-      item.append(node("small", props, "muted"));
-      list.append(item);
-    }
-    card.append(list); target.append(card);
+  sidebar.append(summary);
+  const outline = node("section", undefined, "design-outline"); outline.append(node("h3", `${page.page} 页面区块`));
+  const list = node("ol");
+  for (const component of page.components) list.append(node("li", component.name));
+  outline.append(list); sidebar.append(outline);
+  if (designDraft.openQuestions?.length) {
+    const questions = node("section", undefined, "design-questions"); questions.append(node("h3", "待确认"));
+    const list = node("ul"); for (const question of designDraft.openQuestions) list.append(node("li", question.question));
+    questions.append(list); sidebar.append(questions);
   }
+  preview.append(canvas, sidebar); target.append(preview);
+
+  const targetSelect = $("#design-target"); targetSelect.replaceChildren();
+  for (const component of page.components) {
+    const option = node("option", component.name); option.value = component.instanceId; option.selected = component.instanceId === selectedDesignComponent; targetSelect.append(option);
+  }
+  if (!page.components.some((component) => component.instanceId === selectedDesignComponent)) selectedDesignComponent = page.components[0]?.instanceId || "";
+  targetSelect.value = selectedDesignComponent;
+  targetSelect.onchange = () => {
+    selectedDesignComponent = targetSelect.value;
+    const component = page.components.find((item) => item.instanceId === selectedDesignComponent);
+    $("#design-props").value = JSON.stringify(component?.props || {}, null, 2);
+  };
+  const selected = page.components.find((item) => item.instanceId === selectedDesignComponent);
+  $("#design-props").value = JSON.stringify(selected?.props || {}, null, 2);
   feedback.hidden = false;
 }
 
@@ -328,7 +393,8 @@ $("#feedback-form").onsubmit = (event) => { event.preventDefault(); action(async
   let props;
   try { props = JSON.parse($("#design-props").value); } catch { throw new Error("属性补丁必须是 JSON 对象"); }
   if (!props || typeof props !== "object" || Array.isArray(props)) throw new Error("属性补丁必须是 JSON 对象");
-  const page = designDraft.pageTree[0]; const component = page?.components[0];
+  const page = designDraft.pageTree.find((item) => item.page === selectedDesignPage) || designDraft.pageTree[0];
+  const component = page?.components.find((item) => item.instanceId === selectedDesignComponent) || page?.components[0];
   if (!component) throw new Error("当前设计没有可修改的组件");
   await api("POST", `/design-drafts/${encodeURIComponent(designDraft.id)}/patches`, { expectedDesignHash: designDraft.designHash, feedback, operations: [{ op: "set_props", page: page.page, componentId: component.instanceId, props }] });
   $("#design-feedback").value = "";
