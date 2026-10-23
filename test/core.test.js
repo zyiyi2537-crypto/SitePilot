@@ -149,6 +149,16 @@ test("candidate cannot become draft before quality and review", () => {
   assert.equal(draft.status, "ready_for_review");
 });
 
+test("candidate child revisions cannot cross project runs", () => {
+  const store = new SitePilotStore();
+  const firstProject = store.createProject({ goal: "first" });
+  const secondProject = store.createProject({ goal: "second" });
+  const firstRun = store.createRun(firstProject.id);
+  const secondRun = store.createRun(secondProject.id);
+  const parent = store.createCandidate(firstRun.id, {});
+  assert.throws(() => store.createCandidate(secondRun.id, { parentId: parent.id }), /does not belong to run/);
+});
+
 test("answering strategy questions creates a new immutable run", () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "build a website" });

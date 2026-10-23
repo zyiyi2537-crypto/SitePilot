@@ -288,6 +288,10 @@ export class SitePilotStore {
   createCandidate(runId, input) {
     const run = this.runs.get(runId);
     if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    if (input.parentId) {
+      const parent = this.candidates.get(input.parentId);
+      if (!parent || parent.runId !== runId) throw new PolicyError("Candidate parent does not belong to run", "POLICY_DENIED");
+    }
     if (input.designDraftId) {
       const design = this.designs.get(input.designDraftId);
       if (!design || design.runId !== runId) throw new PolicyError("Candidate design draft does not belong to run", "POLICY_DENIED");

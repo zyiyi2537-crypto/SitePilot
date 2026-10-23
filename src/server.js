@@ -48,6 +48,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     }
     return text ? JSON.parse(text) : {};
   };
+  const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
+  const generationWorkspace = (run, designId) => path.resolve(generation.worktreeRoot, run.id, run.candidateIds?.length ? designId : "");
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
@@ -86,8 +88,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const workspace = candidate.codeArtifact?.workspace;
         const run = store.runs.get(candidate.runId);
-        const expectedWorkspace = run ? path.resolve(generation.worktreeRoot, run.id) : null;
-        if (!workspace || !expectedWorkspace || path.resolve(workspace) !== expectedWorkspace) throw new PolicyError("Preview workspace is outside the server-owned run directory", "POLICY_DENIED");
+        const runRoot = run ? path.resolve(generation.worktreeRoot, run.id) : null;
+        const expectedWorkspace = workspace ? path.resolve(workspace) : null;
+        if (!expectedWorkspace || !runRoot || (expectedWorkspace !== runRoot && !expectedWorkspace.startsWith(`${runRoot}${path.sep}`))) throw new PolicyError("Preview workspace is outside the server-owned run directory", "POLICY_DENIED");
         const active = [...previewSessions.values()].find((session) => session.candidateId === candidate.id && session.expiresAt > Date.now());
         if (active) return send(res, 200, active.public);
         const manifest = await loadPreviewManifest(expectedWorkspace);
@@ -182,7 +185,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (tool === "generate_candidate") {
           if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
           if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
-          resource = path.resolve(generation.worktreeRoot, run.id);
+          const design = run.designDraftId ? store.designs.get(run.designDraftId) : null;
+          if (!design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+          const previous = latestCandidate(run);
+          if (previous?.designDraftId === design.id) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
+          resource = generationWorkspace(run, design.id);
           planHash = run.pagePlan.sourceManifestHash;
         } else if (tool === "prepare_payload_template") {
           if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
@@ -306,12 +313,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
         const designDraft = run.designDraftId ? store.designs.get(run.designDraftId) : null;
         if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
-        if (run.candidateIds.length || generatingRuns.has(run.id)) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
+        const previousCandidate = latestCandidate(run);
+        if (previousCandidate?.designDraftId === designDraft.id || generatingRuns.has(run.id)) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
         for (const route of run.pagePlan.routes) for (const component of route.components) {
           const approved = registry.blocks.get(component.registryId);
           if (!approved || approved.state !== "approved" || approved.repository !== component.source.repository || approved.commit !== component.source.commit || approved.path !== component.source.path) return send(res, 422, { code: "COMPONENTS_NOT_APPROVED" });
         }
-        const root = path.resolve(generation.worktreeRoot, run.id);
+        const root = generationWorkspace(run, designDraft.id);
         const input = await readJson(req);
         grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "generate_candidate", resource: root, planHash: run.pagePlan.sourceManifestHash });
         store.event(run.id, "grant.consumed", { grantId: input.grantId });
@@ -326,7 +334,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           sourceResolver: (source) => codeAtlas.getCompleteFile({ ...source, expectedCommit: source.commit }),
         });
         const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
-        const candidate = store.createCandidate(run.id, { designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, sourceRefs: run.research?.evidence || [] });
+        const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, sourceRefs: run.research?.evidence || [] });
         candidate.build = build;
         run.checkpoint = "candidate_ready";
         store.persist?.();

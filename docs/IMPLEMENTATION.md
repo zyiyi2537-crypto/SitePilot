@@ -16,6 +16,8 @@ After a generated candidate passes the manifest/build gate, `POST /candidates/:i
 
 `POST /candidates/:id/payload-plan` is the read-only CMS boundary before `POST /candidates/:id/payload-draft`: it accepts only explicit per-page content and Claim references, invokes the pinned Website Template schema planner, and returns draft operations tagged with the candidate's design revision. Missing content and unsupported template blocks fail with `422`; no CMS write occurs in this step.
 
+Design feedback after a candidate now supports a child candidate: the new immutable `DesignDraft` is generated in its own server-derived `worktreeRoot/runId/designDraftId`, and the new `CandidateRevision.parentId` references the preceding candidate. Existing candidates and their preview sessions are retained. Re-generating against the same design revision is rejected, and reviewer grants bind to the exact revision worktree.
+
 The V0 HTTP server exposes `POST /projects`, `POST /projects/:id/runs`, `POST /runs/:id/candidates`, and reviewer-only `POST /candidates/:id/review`. It does not expose a quality-decision route: QA outcomes must be written by the internal orchestrator, not claimed by a client. The API requires distinct operator and reviewer bearer tokens; no route publishes production or moves a delivery pointer.
 
 `CandidateRevision` is the mutable-workflow boundary. Code and CMS changes create candidates; a `DraftVersion` is created only by `packageReview` after quality and review gates pass. The default in-memory store is a V0 executable specification; `src/persistence.js` provides an opt-in JSON durable store for local recovery.

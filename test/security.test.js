@@ -251,6 +251,45 @@ test("generation binds candidates to the latest design revision", async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("design feedback creates an isolated child candidate and blocks duplicate revisions", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const reviewerToken = "b".repeat(32);
+  const l2Token = "c".repeat(32);
+  const registry = new BlockRegistry();
+  const commit = "f".repeat(40);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const root = await fs.mkdtemp("/tmp/sitepilot-child-candidate-");
+  const codeAtlas = { getCompleteFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
+  const server = createServer(store, { apiToken: token, reviewerToken, reviewerId: "reviewer-1", l2Token }, undefined, registry, codeAtlas, null, null, { worktreeRoot: root });
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact" });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  assert.equal((await request(server, "POST", `/runs/${run.id}/page-plan`, token, {})).status, 200);
+  const firstDesign = await request(server, "POST", `/runs/${run.id}/design-drafts`, token, {});
+  const firstGrant = await request(server, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const first = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: firstGrant.body.id });
+  assert.equal(first.status, 201);
+  const patched = await request(server, "POST", `/design-drafts/${firstDesign.body.id}/patches`, token, {
+    expectedDesignHash: firstDesign.body.designHash,
+    operations: [{ op: "set_props", page: "home", componentId: firstDesign.body.pageTree[0].components[0].instanceId, props: { density: "compact" } }],
+  });
+  assert.equal(patched.status, 201);
+  const secondGrant = await request(server, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(secondGrant.status, 201);
+  assert.equal(secondGrant.body.resource, `${root}/${run.id}/${patched.body.draft.id}`);
+  const second = await request(server, "POST", `/runs/${run.id}/generate`, l2Token, { grantId: secondGrant.body.id });
+  assert.equal(second.status, 201);
+  assert.equal(second.body.candidate.parentId, first.body.candidate.id);
+  assert.equal(second.body.candidate.designDraftId, patched.body.draft.id);
+  assert.equal(second.body.candidate.codeArtifact.designHash, patched.body.draft.designHash);
+  assert.match(second.body.candidate.codeArtifact.workspace, new RegExp(`${patched.body.draft.id}$`));
+  const duplicateGrant = await request(server, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(duplicateGrant.status, 409);
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("Payload worktree and build actions require scoped single-use L2 grants", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "website" });
