@@ -20,6 +20,7 @@ import { PlaywrightPreviewAdapter } from "./playwright-preview.js";
 import { PayloadBuildPipeline } from "./payload-build.js";
 import { PINNED_SOURCES } from "./pinned-sources.js";
 import { LocalPreviewServer, loadPreviewManifest } from "./preview-server.js";
+import { createPayloadDraftPlan } from "./payload-template.js";
 
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null) {
   const generatingRuns = new Set();
@@ -68,6 +69,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const payloadPrepareMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-prepare$/);
       const payloadBuildMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-build$/);
       const candidatePreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/preview$/);
+      const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
@@ -110,6 +112,22 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         clearTimeout(session.timer);
         await session.preview.close();
         return send(res, 200, { sessionId: session.sessionId, closed: true });
+      }
+      if (req.method === "POST" && payloadPlanMatch) {
+        const candidate = store.candidates.get(payloadPlanMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run?.strategy) return send(res, 422, { code: "STRATEGY_REQUIRED" });
+        const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        if (candidate.designDraftId && !design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+        const input = await readJson(req);
+        const plan = createPayloadDraftPlan({
+          strategy: run.strategy,
+          projectId: run.projectId,
+          locales: input.locales || run.inputSnapshot.locale,
+          contentByPage: input.contentByPage,
+        });
+        return send(res, 200, { ...plan, candidateId: candidate.id, designDraftId: design?.id || null, designHash: design?.designHash || null, writesAllowed: false });
       }
       const sourceMatch = url.pathname.match(/^\/projects\/([^/]+)\/sources$/);
       if (req.method === "POST" && sourceMatch) {
@@ -374,7 +392,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

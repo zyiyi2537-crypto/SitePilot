@@ -131,6 +131,31 @@ test("Payload API only creates sandbox drafts after quality gates", async () => 
   assert.equal(store.candidates.get(candidate.id).cmsSnapshot.cmsSnapshotId, "payload_1");
 });
 
+test("Payload plan endpoint is read-only and binds customer claims to the design revision", async () => {
+  const store = new SitePilotStore();
+  const token = "a".repeat(32);
+  const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const project = store.createProject({ goal: "website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const candidate = store.createCandidate(run.id, { designDraftId: design.id });
+  const response = await request(server, "POST", `/candidates/${candidate.id}/payload-plan`, token, {
+    contentByPage: { home: { title: "Home", heroTitle: "Build with evidence", description: "Approved description", cta: "Contact us", claimRefs: ["claim_home"] } },
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.writesAllowed, false);
+  assert.equal(response.body.candidateId, candidate.id);
+  assert.equal(response.body.designDraftId, design.id);
+  assert.equal(response.body.designHash, design.designHash);
+  assert.equal(response.body.operations[0].data.slug, "home");
+  assert.deepEqual(response.body.claimRefs, ["claim_home"]);
+  assert.equal(candidate.cmsSnapshot, null);
+  const missing = await request(server, "POST", `/candidates/${candidate.id}/payload-plan`, token, { contentByPage: {} });
+  assert.equal(missing.status, 422);
+});
+
 test("QA API records signed quality result on candidate", async () => {
   const store = new SitePilotStore();
   const token = "a".repeat(32);

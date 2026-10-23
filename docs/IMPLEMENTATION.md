@@ -14,6 +14,8 @@ The creation-mode design slice adds `page-plan` -> `POST /runs/:id/design-drafts
 
 After a generated candidate passes the manifest/build gate, `POST /candidates/:id/preview` starts a read-only localhost preview from that candidate's server-owned worktree. The endpoint validates the manifest, source hash, and design hash before returning a 15-minute session URL; repeated calls reuse the live session and `DELETE /previews/:sessionId` closes it. Preview sessions are process-local and are never persisted or exposed as public/Payload delivery URLs.
 
+`POST /candidates/:id/payload-plan` is the read-only CMS boundary before `POST /candidates/:id/payload-draft`: it accepts only explicit per-page content and Claim references, invokes the pinned Website Template schema planner, and returns draft operations tagged with the candidate's design revision. Missing content and unsupported template blocks fail with `422`; no CMS write occurs in this step.
+
 The V0 HTTP server exposes `POST /projects`, `POST /projects/:id/runs`, `POST /runs/:id/candidates`, and reviewer-only `POST /candidates/:id/review`. It does not expose a quality-decision route: QA outcomes must be written by the internal orchestrator, not claimed by a client. The API requires distinct operator and reviewer bearer tokens; no route publishes production or moves a delivery pointer.
 
 `CandidateRevision` is the mutable-workflow boundary. Code and CMS changes create candidates; a `DraftVersion` is created only by `packageReview` after quality and review gates pass. The default in-memory store is a V0 executable specification; `src/persistence.js` provides an opt-in JSON durable store for local recovery.
