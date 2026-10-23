@@ -176,6 +176,19 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.match(generated.body.candidate.codeArtifact.workspace, new RegExp(`${run.id}$`));
   assert.equal(generated.body.candidate.designDraftId, design.body.id);
   assert.equal(generated.body.candidate.codeArtifact.designHash, design.body.designHash);
+  const preview = await request(server, "POST", `/candidates/${generated.body.candidate.id}/preview`, token, {});
+  assert.equal(preview.status, 201);
+  assert.equal(preview.body.candidateHash, generated.body.candidate.candidateHash);
+  assert.equal(preview.body.designHash, design.body.designHash);
+  assert.equal(preview.body.localOnly, true);
+  const previewResponse = await fetch(preview.body.baseUrl);
+  assert.equal(previewResponse.status, 200);
+  assert.match(await previewResponse.text(), new RegExp(`data-sitepilot-design-hash="${design.body.designHash}"`));
+  const reused = await request(server, "POST", `/candidates/${generated.body.candidate.id}/preview`, token, {});
+  assert.equal(reused.status, 200);
+  assert.equal(reused.body.sessionId, preview.body.sessionId);
+  const closed = await request(server, "DELETE", `/previews/${preview.body.sessionId}`, token);
+  assert.equal(closed.status, 200);
   await fs.rm(root, { recursive: true, force: true });
 });
 

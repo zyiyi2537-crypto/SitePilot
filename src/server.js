@@ -19,9 +19,12 @@ import { QualityAdapter } from "./quality-adapter.js";
 import { PlaywrightPreviewAdapter } from "./playwright-preview.js";
 import { PayloadBuildPipeline } from "./payload-build.js";
 import { PINNED_SOURCES } from "./pinned-sources.js";
+import { LocalPreviewServer, loadPreviewManifest } from "./preview-server.js";
 
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null) {
   const generatingRuns = new Set();
+  const previewSessions = new Map();
+  const previewTtlMs = 15 * 60 * 1000;
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
   const reviewerToken = auth.reviewerToken ?? process.env.SITEPILOT_REVIEW_TOKEN ?? "";
   const l2Token = auth.l2Token ?? process.env.SITEPILOT_L2_TOKEN ?? "";
@@ -44,7 +47,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     }
     return text ? JSON.parse(text) : {};
   };
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
       if (req.method === "GET" && ["/studio", "/studio.css", "/studio.js"].includes(url.pathname)) {
@@ -64,6 +67,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const grantRevokeMatch = url.pathname.match(/^\/grants\/([^/]+)\/revoke$/);
       const payloadPrepareMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-prepare$/);
       const payloadBuildMatch = url.pathname.match(/^\/runs\/([^/]+)\/payload-build$/);
+      const candidatePreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/preview$/);
+      const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
@@ -72,6 +77,40 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const projectRunsMatch = url.pathname.match(/^\/projects\/([^/]+)\/runs$/);
       if (req.method === "GET" && projectRunsMatch) return send(res, 200, { runs: [...store.runs.values()].filter((run) => run.projectId === projectRunsMatch[1]) });
       if (req.method === "GET" && url.pathname === "/candidates") return send(res, 200, { candidates: [...store.candidates.values()] });
+      if (req.method === "POST" && candidatePreviewMatch) {
+        if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(candidatePreviewMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+        const workspace = candidate.codeArtifact?.workspace;
+        const run = store.runs.get(candidate.runId);
+        const expectedWorkspace = run ? path.resolve(generation.worktreeRoot, run.id) : null;
+        if (!workspace || !expectedWorkspace || path.resolve(workspace) !== expectedWorkspace) throw new PolicyError("Preview workspace is outside the server-owned run directory", "POLICY_DENIED");
+        const active = [...previewSessions.values()].find((session) => session.candidateId === candidate.id && session.expiresAt > Date.now());
+        if (active) return send(res, 200, active.public);
+        const manifest = await loadPreviewManifest(expectedWorkspace);
+        const expectedDesignHash = candidate.codeArtifact?.designHash || null;
+        if (expectedDesignHash && manifest.design?.designHash !== expectedDesignHash) throw new PolicyError("Preview manifest design hash does not match candidate", "STALE_REVISION");
+        await validateGeneratedCandidate({ worktreeRoot: expectedWorkspace, expectedDesignHash: expectedDesignHash || undefined });
+        const preview = new LocalPreviewServer({ plan: manifest });
+        const address = await preview.listen();
+        const sessionId = `preview_${crypto.randomUUID().replaceAll("-", "")}`;
+        const expiresAt = Date.now() + previewTtlMs;
+        const publicSession = Object.freeze({ sessionId, candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: candidate.designDraftId || null, designHash: manifest.design?.designHash || null, baseUrl: `http://${address.host}:${address.port}/`, expiresAt: new Date(expiresAt).toISOString(), localOnly: true, writesAllowed: false });
+        const timer = setTimeout(() => { const session = previewSessions.get(sessionId); previewSessions.delete(sessionId); session?.preview.close().catch(() => {}); }, previewTtlMs);
+        timer.unref?.();
+        previewSessions.set(sessionId, { sessionId, candidateId: candidate.id, expiresAt, preview, public: publicSession, timer });
+        store.event(candidate.runId, "candidate.preview.created", { candidateId: candidate.id, sessionId, expiresAt: publicSession.expiresAt });
+        return send(res, 201, publicSession);
+      }
+      if (req.method === "DELETE" && previewMatch) {
+        const session = previewSessions.get(previewMatch[1]);
+        if (!session) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        previewSessions.delete(session.sessionId);
+        clearTimeout(session.timer);
+        await session.preview.close();
+        return send(res, 200, { sessionId: session.sessionId, closed: true });
+      }
       const sourceMatch = url.pathname.match(/^\/projects\/([^/]+)\/sources$/);
       if (req.method === "POST" && sourceMatch) {
         const source = evidence.registerSource({ ...(await readJson(req)), projectId: sourceMatch[1] });
@@ -339,6 +378,14 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });
+  server.on("close", () => {
+    for (const session of previewSessions.values()) {
+      clearTimeout(session.timer);
+      session.preview.close().catch(() => {});
+    }
+    previewSessions.clear();
+  });
+  return server;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
