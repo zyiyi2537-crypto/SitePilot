@@ -10,7 +10,9 @@
 
 ## Reuse decision
 
-SitePilot adopts Pi as the planned agent-loop foundation, not the Pi coding-agent CLI as the product. The current SitePilot implementation has not imported Pi packages and does not yet run model-directed multi-agent roles. Existing role labels, deterministic orchestration, and durable tool journal are groundwork, not evidence of independent collaborating agents.
+SitePilot uses Pi as its agent-loop foundation, not the Pi coding-agent CLI as the product. The pinned `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` packages now power the first model-directed workflow: `Supervisor → Architect → Research → Supervisor`. Studio model settings are adapted in memory; each role receives only its allowlisted SitePilot tools, and outputs are stored as typed artifacts.
+
+This is an implemented first slice, not a complete multi-agent delivery system. ContentCMS, Coding, QA and Review remain policy definitions and existing guarded adapters; the Pi Supervisor does not yet dispatch those roles. Automated workflow tests use Pi's faux provider. A successful live-provider multi-role run has not yet been recorded.
 
 Adopted principles:
 
@@ -27,12 +29,12 @@ SitePilot-specific boundaries remain authoritative:
 - Pi's generic `bash`, `write` and `edit` tools cannot be exposed directly to the Agent; they must be wrapped by SitePilot's worktree and sandbox adapters.
 - Pi's sub-agent omission is acceptable: SitePilot roles are structured tasks with explicit artifacts, not unrestricted agent-to-agent access.
 
-## Integration order
+## Integration status and next steps
 
-1. Add pinned `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` dependencies; adapt Studio's selected provider/model into Pi's model API and retain an OpenAI-compatible fallback only where required.
-2. Give each SitePilot business role a Pi `Agent` instance, but expose only role-specific tools that call through SitePilot's `ToolRuntime`, L0/L1/L2 grants, source allowlist, worktree policy and audit journal. Pi's generic filesystem and shell tools stay unavailable.
-3. Replace deterministic role hand-offs incrementally: Architect first, then Research/Content in read-only parallel, then Coding behind a scoped grant, then independent QA and Review. Every hand-off is a versioned artifact, not shared chat history.
-4. Add checkpointed tasks and joins using Pi durable only after its experimental API passes a compatibility/upgrade review. Keep SitePilot's store and permission model authoritative; interrupted side effects require SitePilot replay policy and reviewer identity.
-5. Prove different next-action paths across missing evidence, incompatible component, and QA failure cases. Until those tests pass, describe the pipeline as deterministic orchestration, not completed multi-agent collaboration.
+1. Done: pinned the Pi dependencies and adapted Studio's selected provider/model into Pi's model APIs for Chat Completions and Responses mode.
+2. Done for the first slice: role tools call through SitePilot's `ToolRuntime`; the Supervisor runs at L0, CodeAtlas is bound to an allowlisted repository and fixed commit, and generic filesystem/shell tools remain unavailable.
+3. In progress: expand dispatch after the creation slice proves reliable. Next connect ContentCMS and Coding only through the existing Payload sandbox and scoped project worktree; then attach independent QA and Review agents.
+4. Deferred: use Pi durable tasks only after its experimental API passes compatibility and upgrade review. SitePilot's store and replay policy remain authoritative.
+5. Current tests cover missing CodeAtlas input, role-tool rejection and a successful Supervisor→Architect→Research workflow with the faux provider. Add incompatible-source, model-failure, restart/recovery and live-provider evidence before enabling write-capable roles.
 
-Do not copy the monorepo or coding-agent CLI. Pin package versions and source revision, build and license-check them, then run security and workflow tests before enabling a role in Studio.
+The Pi monorepo and coding-agent CLI are not copied into SitePilot. Package versions are pinned; future upgrades require source/license review plus security and workflow tests before enabling additional roles in Studio.

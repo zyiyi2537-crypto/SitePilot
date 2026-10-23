@@ -6,6 +6,16 @@ import { PolicyError } from "./core.js";
 
 const STATUSES = new Set(["queued", "intent_committed", "running", "succeeded", "failed", "partial", "needs_input", "interrupted", "cancelled"]);
 
+export function resolveToolJournalPath({ explicitPath, databaseFile, stateFile } = {}) {
+  if (explicitPath) {
+    if (!path.isAbsolute(explicitPath)) throw new PolicyError("SITEPILOT_TOOL_JOURNAL_PATH must be absolute", "INVALID_INPUT");
+    return path.resolve(explicitPath);
+  }
+  if (databaseFile) return `${databaseFile}.tools.json`;
+  if (stateFile) return `${stateFile}.tools.json`;
+  return null;
+}
+
 export class JsonToolJournal {
   constructor(file) {
     if (!file || !path.isAbsolute(file)) throw new PolicyError("Tool journal path must be absolute", "POLICY_DENIED");
@@ -28,9 +38,9 @@ export class JsonToolJournal {
 
   write(record) {
     this.records.set(record.id, structuredClone(record));
-    fs.mkdirSync(path.dirname(this.file), { recursive: true });
+    fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
     const temporary = `${this.file}.tmp-${process.pid}`;
-    fs.writeFileSync(temporary, JSON.stringify([...this.records.values()], null, 2), "utf8");
+    fs.writeFileSync(temporary, JSON.stringify([...this.records.values()], null, 2), { encoding: "utf8", mode: 0o600 });
     fs.renameSync(temporary, this.file);
   }
 

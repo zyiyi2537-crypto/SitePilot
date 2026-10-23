@@ -2,8 +2,16 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-export const ROLES = ["Architect", "Research", "Coding", "QA", "Review"];
+export const ROLES = ["Supervisor", "Architect", "Research", "ContentCMS", "Coding", "QA", "Review"];
 export const TOOLS = new Map([
+  ["delegate_architect", "L0"],
+  ["delegate_research", "L0"],
+  ["request_customer_input", "L0"],
+  ["complete_plan", "L0"],
+  ["submit_site_strategy", "L0"],
+  ["submit_component_plan", "L0"],
+  ["retrieve_codeatlas", "L0"],
+  ["inspect_payload_schema", "L0"],
   ["create_project_worktree", "L2"],
   ["fetch_pinned_source", "L2"],
   ["inspect_source_package", "L0"],
@@ -95,6 +103,7 @@ export class SitePilotStore {
     this.canvasPatches = new Map();
     this.candidates = new Map();
     this.drafts = new Map();
+    this.artifacts = new Map();
     this.audit = [];
   }
 
@@ -145,7 +154,7 @@ export class SitePilotStore {
     });
     const run = {
       id: id("run"), projectId, status: "running", checkpoint: "created",
-      inputSnapshot: snapshot, strategy: null, tasks: [], candidateIds: [],
+      inputSnapshot: snapshot, strategy: null, tasks: [], artifactIds: [], candidateIds: [],
       events: []
     };
     this.runs.set(run.id, run);
@@ -281,6 +290,26 @@ export class SitePilotStore {
     this.tasks.set(task.id, task);
     run.tasks.push(task.id);
     return task;
+  }
+
+  recordArtifact(runId, artifact) {
+    const run = this.runs.get(runId);
+    if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    if (!artifact || typeof artifact.type !== "string" || typeof artifact.role !== "string" || artifact.runId !== runId) {
+      throw new PolicyError("Invalid agent artifact", "SCHEMA_REJECTED");
+    }
+    const artifactId = id("artifact");
+    const stored = Object.freeze({ artifactId, ...clone(artifact) });
+    this.artifacts.set(artifactId, stored);
+    run.artifactIds = [...(run.artifactIds || []), artifactId];
+    this.event(runId, "agent.artifact.persisted", { artifactId, type: stored.type, role: stored.role });
+    return stored;
+  }
+
+  artifactsForRun(runId) {
+    const run = this.runs.get(runId);
+    if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
+    return (run.artifactIds || []).map((artifactId) => this.artifacts.get(artifactId)).filter(Boolean);
   }
 
   completeTask(taskId, output) {
@@ -448,6 +477,8 @@ export function planStrategy(project) {
 export function assertTool(tool, level, grant = {}) {
   const expected = TOOLS.get(tool);
   if (!expected) throw new PolicyError(`Tool is not registered: ${tool}`, "POLICY_DENIED");
+  const rank = { L0: 0, L1: 1, L2: 2 };
+  if (!(level in rank) || rank[level] < rank[expected]) throw new PolicyError(`${tool} requires ${expected} permission`, "POLICY_DENIED");
   if (expected === "L2" && grant.level !== "L2") throw new PolicyError(`${tool} requires an L2 grant`, "POLICY_DENIED");
   return { tool, level: expected };
 }

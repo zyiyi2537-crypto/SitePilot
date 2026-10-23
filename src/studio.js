@@ -80,6 +80,24 @@ async function showRun() {
   if (!runId) { target.textContent = "此项目尚无 Run。"; return; }
   const run = await api("GET", `/runs/${encodeURIComponent(runId)}`);
   currentRun = run;
+  const agentState = await api("GET", `/runs/${encodeURIComponent(runId)}/agent`);
+  const agentOutput = $("#agent-output");
+  const decisionOutput = $("#agent-decisions");
+  decisionOutput.replaceChildren();
+  agentOutput.hidden = !agentState.agentState;
+  decisionOutput.hidden = !agentState.decisions?.length;
+  if (agentState.agentState) {
+    agentOutput.textContent = JSON.stringify({ status: agentState.agentState.status, questions: agentState.agentState.questions, artifacts: agentState.artifacts.map(({ artifactId, type, role, status }) => ({ artifactId, type, role, status })) }, null, 2);
+  }
+  for (const decision of agentState.decisions || []) {
+    const item = node("article", undefined, "agent-decision");
+    item.append(node("strong", `${decision.role || "Agent"} · ${decision.action || "decision"}`));
+    item.append(node("p", decision.whyNow));
+    item.append(node("p", `预期观察：${decision.expectedObservation}`));
+    item.append(node("small", `风险：${decision.risk} · 停止条件：${(decision.stopIf || []).join("、") || "未填写"}`));
+    decisionOutput.append(item);
+  }
+  $("#run-agents").disabled = !run.strategy || run.status === "superseded";
   const designResult = await api("GET", `/runs/${encodeURIComponent(runId)}/design-drafts`);
   designDraft = designResult.designs.at(-1) || null;
   const { candidates } = await api("GET", "/candidates");
@@ -267,6 +285,23 @@ $("#refresh").onclick = () => action(loadProjects);
 $("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
 $("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };
+$("#run-agents").onclick = () => action(async () => {
+  if (!runId) throw new Error("请先选择项目 Run");
+  const form = new FormData($("#research-form"));
+  const repository = String(form.get("repository") || "").trim();
+  const expectedCommit = String(form.get("expectedCommit") || "").trim();
+  if (Boolean(repository) !== Boolean(expectedCommit)) throw new Error("CodeAtlas 仓库 ID 和固定 commit 必须同时填写");
+  const button = $("#run-agents"); button.disabled = true; button.textContent = "Agent 规划中…";
+  try {
+    const result = await api("POST", `/runs/${encodeURIComponent(runId)}/agent`, repository ? { repository, expectedCommit } : {});
+    $("#agent-output").hidden = false;
+    $("#agent-output").textContent = JSON.stringify({ status: result.status, questions: result.questions, artifacts: result.artifacts.map(({ artifactId, type, role, status }) => ({ artifactId, type, role, status })) }, null, 2);
+    await showRun();
+    return result.status === "needs_input" ? "总控 Agent 需要补充信息" : "策略与组件研究已生成，可继续设计流程";
+  } finally {
+    button.disabled = false; button.textContent = "总控 Agent 规划";
+  }
+});
 $("#create-plan").onclick = () => action(async () => { if (!runId) throw new Error("请先选择项目 Run"); await api("POST", `/runs/${encodeURIComponent(runId)}/page-plan`, {}); await showRun(); });
 $("#create-design").onclick = () => action(async () => {
   if (!runId) throw new Error("请先选择项目 Run");

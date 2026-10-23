@@ -1,10 +1,10 @@
 # SitePilot 产品需求文档（PRD）
 
-> 文档状态：Draft 0.7
+> 文档状态：Draft 1.0
 > 产品阶段：本地开发中；本文数字均为目标，除非标记 Result
 > 目标用户：官网交付项目负责人、交付工程师、内容/质量审阅人  
 > 文档读者：项目作者、潜在协作者、Agent/RAG 岗位面试官  
-> 更新时间：2026-10-21
+> 更新时间：2026-10-24
 > 产品代号：SitePilot  
 > 数据原则：只使用公开开源代码、公开文档和虚构客户资料；严禁导入或复刻任职公司的模板、组件、CMS、客户代码、设计稿、埋点或内部文档。
 
@@ -20,10 +20,14 @@
 | 0.6 | 2026-10-10 | 增加官网创建与持续维护双模式、GitHub/观测入口的分阶段授权边界；固定 Payload 模板的数据驱动构建路线 | 项目作者 |
 | 0.7 | 2026-10-21 | 补齐自然语言需求到设计草稿、组件/React 代码实现、真实预览和客户反馈迭代主线；将完整研发闭环规划整合为后续维护模式 | 项目作者 |
 | 0.8 | 2026-10-24 | 接入可选的服务端自然语言需求解析、需求草稿确认和原文引用校验；模型输出未通过验证时拒绝创建项目 | 项目作者 |
+| 0.9 | 2026-10-24 | 明确 SitePilot Supervisor 与专业子 Agent 的真实运行时边界；接入 Pi Agent Core/AI，先落地 Supervisor→Architect→Research 首条动态闭环和持久化 Artifact | 项目作者 |
+| 1.0 | 2026-10-24 | 记录首条 Pi 多 Agent 创建闭环的实现状态、测试边界及后续角色扩展顺序 | 项目作者 |
 
 ## 1. 一句话定义
 
 SitePilot 是一个面向 ToB/ToC 官网定制交付的证据驱动多代理工程系统：它读取客户材料和公开代码证据，针对行业、受众、转化目标与约束制定不同官网策略，动态选择模板、组件、CMS 模型和实现方式；代理可以在项目专属的隔离 worktree、分支或沙箱中创建与修改代码，运行测试并把网站推进到可审阅的预览版本，但不能写入 CodeAtlas、生产仓库或发布生产站点，也不会在证据不足时编造客户事实。
+
+这里的“多代理”是产品核心，不是接口包装：`Supervisor` 是总控 Agent，负责维护目标、证据、预算、风险和下一步动作；Architect、Research、ContentCMS、Coding、QA、Review 是具有独立工具目录、权限和结构化产物的专业 Agent。Pi 提供每个 Agent 的 loop、事件、工具生命周期和中断能力，SitePilot 仍是业务状态、权限、沙箱和审批的唯一控制面。第一条真实运行时闭环为 `Supervisor → Architect → Research → Supervisor`，只有该闭环能根据缺口、工具观察和失败结果改变下一步，才允许扩展到写代码和 CMS。
 
 产品包含两个共享工程内核的工作模式：**创建模式**从客户需求与设计/内容资料产出首版官网候选；**维护模式**从已交付项目的人工反馈、GitHub Issue 或经脱敏归并的线上错误产出修复候选。两者复用项目隔离、CodeAtlas 只读证据、Payload 沙箱、版本快照、测试、审查和审计，不建立第二套 RAG 或第二套 Harness。维护模式是后续阶段，不改变 V0 的创建模式出口标准。
 
@@ -318,6 +322,14 @@ SitePilot 提取产品字段后发现 5 个产品缺少认证材料，于是询�
 
 ## 8. Agent 设计
 
+### 8.0 Supervisor 与专业子 Agent 的运行时边界
+
+被调度的 Agent 各自使用独立的 Pi `Agent` 实例、system prompt、工具白名单、AgentRun ID、事件流和结构化 artifact；尚未接入调度器的角色只保留策略定义，不视为已运行。Supervisor 不能直接读写项目文件；它只能委派角色、请求客户输入、汇总观察或结束当前阶段。子 Agent 不共享无限增长的聊天记录，只能读取由服务端授予的输入 artifact，并返回新的不可变 artifact。
+
+首个真实闭环由服务端创建 Supervisor Agent。Supervisor 可以调用 `delegate_architect`、`delegate_research`、`request_customer_input` 和 `complete_plan`。Architect 只能产生 `SiteStrategy`，Research 只能通过固定 repository/commit 调用 CodeAtlas 只读检索并产生 `ComponentPlan`。任何角色尝试使用未登记工具必须在 Pi hook 和 SitePilot policy 两层被拒绝。模型输出不能提升 grant；Coding 的 L2 worktree、Payload 写入和生产相关能力在后续阶段单独接入。
+
+运行轨迹只保存可审计的 `whyNow`、工具参数摘要、观察结果、风险、决策、artifact 引用和 policy version，不保存或展示模型隐式思维链。每个工具动作先进入 ToolRuntime journal；只读检索可以安全重放，未知副作用的动作必须中断并由新 AgentRun、幂等键和人工审阅恢复。
+
 ### 8.1 核心循环
 
 ~~~text
@@ -386,7 +398,7 @@ Architect 必须先输出可审阅的 SiteStrategy，再允许 Coding 开工。S
 
 工业设备站优先产品参数、应用场景、技术询盘与双语准确性；SaaS 站优先功能理解、定价证据、试用转化与帮助文档；消费活动站优先素材许可、活动时间、商品呈现与移动端转化。策略差异必须反映在页面树、组件选择、CMS schema、代码差异和 QA 检查集，而不只是标题或主题色。QA 检查完成后，Orchestrator 可针对失败调整实现计划，但不能自行更改已经批准的客户事实或业务目标。
 
-多代理基础优先采用本地评估过的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前代码尚未集成 Pi loop，现有命名角色和流水线是确定性编排，不得描述为已完成多代理协作。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
+多代理基础采用固定版本的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前已实现 Supervisor→Architect→Research 首条动态闭环；ContentCMS、Coding、QA、Review 还未由 Pi Supervisor 调度。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
 
 自然语言到设计草稿的第一版实现不引入通用拖拽建站器。Puck 只作为受限画布依赖候选：SitePilot 自己定义组件白名单、props schema、设计 token、响应式规则和序列化版本；画布的保存、差异、权限、审计和候选版本仍由 SitePilot 管理。若 Puck 与当前 Payload 区块无法保持同一渲染结果，优先缩小画布能力而不是维护第二套渲染实现。
 
@@ -1320,9 +1332,9 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 |---|---|---|
 | SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
-| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；SiteStrategy 仍由确定性行业规划器生成，真实视觉设计和模型驱动策略仍未完成 | 接入客户资料证据、模型策略规划和真实设计画布 |
-| Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 采用 Pi 模型适配器，增加密钥存储策略和角色级模型配置 |
-| Pi Agent 多角色运行时 | 已检查 Pi agent loop、工具钩子和 durable task 实现，并记录采用方案；SitePilot 尚未安装 Pi 依赖，当前流程仍是确定性流水线 | 先接入 Pi Agent/模型适配，再按 Architect → Research/Content → Coding → QA/Review 逐角色迁移，并通过多路径验收 |
+| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy；页面视觉设计仍由现有设计草稿路径生成 | 将策略与设计草稿衔接，并验证真实客户反馈闭环 |
+| Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
+| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research 的动态闭环、结构化决策和 Artifact 持久化；faux-provider 自动化测试通过，尚无真实在线模型多角色运行记录 | 先把这条闭环接入设计与 Payload 创建流程，再依次接入 ContentCMS、受限 Coding、QA 和独立 Review |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |

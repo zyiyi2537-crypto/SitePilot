@@ -22,6 +22,9 @@ import { PINNED_SOURCES } from "./pinned-sources.js";
 import { LocalPreviewServer, loadPreviewManifest } from "./preview-server.js";
 import { createPayloadDraftPlan } from "./payload-template.js";
 import { createIntakeAdapterFromEnvironment, createOpenAICompatibleIntakeAdapter } from "./intake.js";
+import { createPiModelRuntime, SitePilotAgentRuntime } from "./agent-runtime.js";
+import { createAgentToolRuntime, runCreationSupervisor } from "./agent-supervisor.js";
+import { JsonToolJournal, resolveToolJournalPath } from "./tool-runtime.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -59,13 +62,15 @@ function modelConfigFromInput(input = {}) {
   return { baseUrl, model, apiKey, apiMode };
 }
 
-export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter) {
+export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter, agentModelRuntimeFactory = createPiModelRuntime, agentToolJournal = null) {
   intake = intake || createIntakeAdapterFromEnvironment();
   const environmentIntake = intake;
   const environmentModelConfig = environmentIntake ? { baseUrl: environmentIntake.endpoint || null, model: environmentIntake.modelVersion || null, apiMode: environmentIntake.apiMode || "chat_completions", source: "server" } : null;
   let activeIntake = environmentIntake;
   let activeModelConfig = environmentModelConfig;
+  let activeModelSecret = process.env.SITEPILOT_MODEL_API_KEY || null;
   const generatingRuns = new Set();
+  const runningAgentRuns = new Set();
   const previewSessions = new Map();
   const intakePreviews = new Map();
   const previewTtlMs = 15 * 60 * 1000;
@@ -135,11 +140,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (input.clear === true) {
           activeIntake = environmentIntake;
           activeModelConfig = environmentModelConfig;
+          activeModelSecret = process.env.SITEPILOT_MODEL_API_KEY || null;
           return send(res, 200, { configured: Boolean(activeIntake), cleared: true, model: activeModelConfig?.model || null, baseUrl: activeModelConfig?.baseUrl || null, apiMode: activeModelConfig?.apiMode || null, source: activeModelConfig?.source || null });
         }
         const config = modelConfigFromInput(input);
         activeIntake = modelAdapterFactory(config);
         activeModelConfig = { baseUrl: config.baseUrl, model: config.model, apiMode: config.apiMode, source: "studio-memory" };
+        activeModelSecret = config.apiKey;
         return send(res, 200, { configured: true, model: config.model, baseUrl: config.baseUrl, apiMode: config.apiMode, keyConfigured: true, persisted: false });
       }
       if (req.method === "POST" && url.pathname === "/intake/preview") {
@@ -203,6 +210,56 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.persist?.();
         intakePreviews.delete(input.intakeId);
         return send(res, 201, { project, run });
+      }
+      const agentRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/agent$/);
+      if (req.method === "GET" && agentRunMatch) {
+        const run = store.runs.get(agentRunMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const agentState = run.agentState || null;
+        const roleDecisions = (store.audit || [])
+          .filter((event) => event.runId === run.id && event.type === "agent.decision" && event.data?.role !== "Supervisor")
+          .map(({ data }) => ({
+            agentRunId: data.agentRunId,
+            role: data.role,
+            action: data.action,
+            whyNow: data.whyNow,
+            expectedObservation: data.expectedObservation,
+            stopIf: data.stopIf || [],
+            risk: data.risk,
+            at: data.at,
+          }));
+        const decisions = [...(agentState?.decisions || []), ...roleDecisions]
+          .sort((left, right) => Date.parse(left.at || left.createdAt) - Date.parse(right.at || right.createdAt));
+        return send(res, 200, {
+          runId: run.id,
+          checkpoint: run.checkpoint,
+          agentState,
+          decisions,
+          artifacts: store.artifactsForRun?.(run.id) || [],
+        });
+      }
+      if (req.method === "POST" && agentRunMatch) {
+        if (!activeModelConfig?.baseUrl || !activeModelConfig?.model || !activeModelSecret) return send(res, 503, { code: "MODEL_NOT_CONFIGURED" });
+        const run = store.runs.get(agentRunMatch[1]);
+        if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        if (runningAgentRuns.has(run.id)) return send(res, 409, { code: "AGENT_RUN_ALREADY_ACTIVE" });
+        const input = await readJson(req);
+        const hasRepository = typeof input.repository === "string" && input.repository.trim().length > 0;
+        const hasCommit = typeof input.expectedCommit === "string" && /^[a-f0-9]{40}$/i.test(input.expectedCommit);
+        if (hasRepository !== hasCommit) return send(res, 422, { code: "INVALID_INPUT", message: "repository and full expectedCommit must be supplied together" });
+        if (hasRepository && (!codeAtlas || typeof codeAtlas.search !== "function")) return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
+        if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
+        runningAgentRuns.add(run.id);
+        try {
+          const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
+          const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" } });
+          if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
+          store.persist?.();
+          return send(res, 200, result);
+        } finally {
+          runningAgentRuns.delete(run.id);
+        }
       }
       if (req.method === "GET" && url.pathname === "/projects") return send(res, 200, { projects: [...store.projects.values()] });
       const projectRunsMatch = url.pathname.match(/^\/projects\/([^/]+)\/runs$/);
@@ -601,6 +658,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const databaseFile = process.env.SITEPILOT_DB_FILE;
   if (databaseFile && [process.env.SITEPILOT_STATE_FILE, process.env.SITEPILOT_EVIDENCE_FILE, process.env.SITEPILOT_REGISTRY_FILE, process.env.SITEPILOT_GRANTS_DB].some(Boolean)) throw new Error("Configure either SITEPILOT_DB_FILE or legacy state files, not both");
   const store = databaseFile ? new SqliteSitePilotStore(databaseFile) : process.env.SITEPILOT_STATE_FILE ? new JsonSitePilotStore(process.env.SITEPILOT_STATE_FILE) : new SitePilotStore();
+  const configuredJournalPath = resolveToolJournalPath({
+    explicitPath: process.env.SITEPILOT_TOOL_JOURNAL_PATH,
+    databaseFile,
+    stateFile: process.env.SITEPILOT_STATE_FILE,
+  });
+  const agentToolJournal = configuredJournalPath ? new JsonToolJournal(configuredJournalPath) : null;
   const evidence = databaseFile ? new SqliteEvidenceStore(databaseFile) : process.env.SITEPILOT_EVIDENCE_FILE ? new JsonEvidenceStore(process.env.SITEPILOT_EVIDENCE_FILE) : new EvidenceStore();
   const registry = databaseFile ? new SqliteBlockRegistry(databaseFile) : process.env.SITEPILOT_REGISTRY_FILE ? new JsonBlockRegistry(process.env.SITEPILOT_REGISTRY_FILE) : new BlockRegistry();
   const codeAtlasSettings = [process.env.CODEATLAS_MCP_URL, process.env.CODEATLAS_MCP_TOKEN, process.env.CODEATLAS_REPOSITORIES];
@@ -615,5 +678,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const quality = process.env.SITEPILOT_QA_PREVIEWS && process.env.SITEPILOT_QA_ARTIFACT_ROOT ? new QualityAdapter({ preview: new PlaywrightPreviewAdapter({ previews: JSON.parse(process.env.SITEPILOT_QA_PREVIEWS), artifactRoot: process.env.SITEPILOT_QA_ARTIFACT_ROOT }) }) : null;
   const payloadBuildSettings = [process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, process.env.SITEPILOT_WORKTREE_ROOT, process.env.SITEPILOT_SANDBOX_IMAGE];
   const payloadBuild = payloadBuildSettings.every(Boolean) ? new PayloadBuildPipeline({ sourceRoot: process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT, image: process.env.SITEPILOT_SANDBOX_IMAGE }) : null;
-  createServer(store, {}, evidence, registry, codeAtlas, payload, quality, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }, grants, payloadBuild).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
+  createServer(store, {}, evidence, registry, codeAtlas, payload, quality, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }, grants, payloadBuild, null, createOpenAICompatibleIntakeAdapter, createPiModelRuntime, agentToolJournal).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
 }

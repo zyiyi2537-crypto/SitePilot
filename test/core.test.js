@@ -13,7 +13,7 @@ import { QualityAdapter } from "../src/quality-adapter.js";
 import { JsonSitePilotStore, SqliteSitePilotStore } from "../src/persistence.js";
 import { DeliveryOrchestrator } from "../src/orchestrator.js";
 import { BlockRegistry, JsonBlockRegistry, SqliteBlockRegistry } from "../src/registry.js";
-import { JsonToolJournal, ToolRuntime } from "../src/tool-runtime.js";
+import { JsonToolJournal, ToolRuntime, resolveToolJournalPath } from "../src/tool-runtime.js";
 import { EvidenceStore, JsonEvidenceStore, SqliteEvidenceStore } from "../src/evidence.js";
 import { buildIndustrialSlice } from "../src/vertical-slice.js";
 import fsSync from "node:fs";
@@ -29,6 +29,14 @@ import { researchComponents } from "../src/research-agent.js";
 import { materializePagePlan } from "../src/code-generator.js";
 import { runLocalCodePipeline } from "../src/local-pipeline.js";
 import { GrantStore, SqliteGrantStore } from "../src/grants.js";
+
+test("tool journal configuration requires explicit absolute paths and derives durable store paths", () => {
+  assert.throws(() => resolveToolJournalPath({ explicitPath: "logs/tools.json" }), /must be absolute/);
+  assert.equal(resolveToolJournalPath({ explicitPath: "/var/lib/sitepilot/tools.json" }), "/var/lib/sitepilot/tools.json");
+  assert.equal(resolveToolJournalPath({ databaseFile: "/var/lib/sitepilot/state.sqlite" }), "/var/lib/sitepilot/state.sqlite.tools.json");
+  assert.equal(resolveToolJournalPath({ stateFile: "/var/lib/sitepilot/state.json" }), "/var/lib/sitepilot/state.json.tools.json");
+  assert.equal(resolveToolJournalPath({}), null);
+});
 
 test("project L2 grants are scoped, revocable and single use", () => {
   const grants = new GrantStore();
@@ -185,6 +193,11 @@ test("worktree policy blocks escape and sensitive files", async () => {
 test("L2 tools fail closed without a grant", () => {
   assert.throws(() => assertTool("apply_code_patch", "L2"), /L2 grant/);
   assert.equal(assertTool("apply_code_patch", "L2", { level: "L2" }).level, "L2");
+});
+
+test("L1 tools fail closed when a role only has read permission", () => {
+  assert.throws(() => assertTool("create_payload_draft", "L0", { level: "L0" }), /L1 permission/);
+  assert.equal(assertTool("create_payload_draft", "L1", { level: "L1" }).level, "L1");
 });
 
 test("CodeAtlas adapter normalizes pinned evidence and rejects stale revisions", async () => {
@@ -538,6 +551,27 @@ test("JSON store recovers immutable design revisions and patches", () => {
   assert.equal(second.designs.get(draft.id).designHash, draft.designHash);
   assert.equal(second.designs.get(next.draft.id).parentId, draft.id);
   assert.equal(second.canvasPatches.get(next.patch.id).nextDesignDraftId, next.draft.id);
+  fsSync.rmSync(file, { force: true });
+});
+
+test("JSON store recovers SitePilot agent artifacts with their run references", () => {
+  const file = `/tmp/sitepilot-agent-${crypto.randomUUID()}.json`;
+  const first = new JsonSitePilotStore(file);
+  const project = first.createProject({ goal: "agent artifact recovery" });
+  const run = first.createRun(project.id);
+  const artifact = first.recordArtifact(run.id, {
+    type: "SiteStrategy",
+    role: "Architect",
+    runId: run.id,
+    inputRefs: ["snapshot_1"],
+    output: { pageHierarchy: ["home"] },
+    status: "complete",
+    risk: "low",
+    createdAt: new Date().toISOString(),
+  });
+  const second = new JsonSitePilotStore(file);
+  assert.deepEqual(second.artifactsForRun(run.id).map((item) => item.artifactId), [artifact.artifactId]);
+  assert.deepEqual(second.artifactsForRun(run.id)[0].output.pageHierarchy, ["home"]);
   fsSync.rmSync(file, { force: true });
 });
 
