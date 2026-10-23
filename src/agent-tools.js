@@ -58,6 +58,21 @@ const schemas = {
     blocks: Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { minItems: 1, maxItems: 20 }),
     locales: Type.Array(Type.String({ minLength: 2, maxLength: 16 }), { minItems: 1, maxItems: 8 }),
     designDirection: Type.String({ minLength: 1, maxLength: 600 }),
+    designTokens: Type.Optional(Type.Object({
+      color: Type.Optional(Type.Object({
+        primary: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
+        surface: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
+        text: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
+      })),
+      spacing: Type.Optional(Type.Object({
+        unit: Type.Optional(Type.Number({ minimum: 1, maximum: 32 })),
+        section: Type.Optional(Type.Number({ minimum: 1, maximum: 240 })),
+      })),
+      typography: Type.Optional(Type.Object({
+        body: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+        heading: Type.Optional(Type.String({ minLength: 1, maxLength: 120 })),
+      })),
+    })),
     openQuestions: Type.Array(Type.Object({
       field: Type.String({ minLength: 1, maxLength: 64 }),
       question: Type.String({ minLength: 1, maxLength: 240 }),

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import path from "node:path";
-import { SitePilotStore, WorktreePolicy, PolicyError, assertTool, planStrategy } from "../src/core.js";
+import { SitePilotStore, WorktreePolicy, PolicyError, assertTool, normalizeDesignTokens, planStrategy } from "../src/core.js";
 import { CodeAtlasMcpAdapter, FixtureCodeAtlasTransport, JsonRpcMcpTransport } from "../src/codeatlas.js";
 import { PinnedSourceFetcher } from "../src/source-fetcher.js";
 import { SourcePackageInspector } from "../src/source-inspector.js";
@@ -50,6 +50,18 @@ test("project L2 grants are scoped, revocable and single use", () => {
   grants.revoke(revoked.id);
   assert.throws(() => grants.consume(revoked.id, input), /revoked/);
   assert.throws(() => grants.issue({ ...input, expiresAt: new Date(Date.now() - 1).toISOString() }), /15 minutes/);
+});
+
+test("design tokens are normalized to bounded, safe defaults", () => {
+  assert.deepEqual(normalizeDesignTokens({ color: { primary: "#0b6e4f" }, spacing: { section: 80 } }), {
+    color: { primary: "#0b6e4f", surface: "#ffffff", text: "#18212b" },
+    spacing: { unit: 4, section: 80 },
+    typography: { body: "system-ui", heading: "system-ui" },
+  });
+  assert.throws(() => normalizeDesignTokens({ color: { primary: "rgb(1,2,3)" } }), /Invalid color/);
+  assert.throws(() => normalizeDesignTokens({ spacing: { section: 8 } }), /Invalid spacing/);
+  assert.throws(() => normalizeDesignTokens({ typography: { body: "system-ui; color:red" } }), /Invalid typography/);
+  assert.throws(() => normalizeDesignTokens({ shadows: { card: "none" } }), /Unknown or invalid/);
 });
 
 test("SQLite grants remain used and revoked after restart", async () => {

@@ -40,6 +40,11 @@ test("Studio can run the Pi Supervisor workflow and read its persisted state", a
     blocks: ["Hero", "ProductGrid", "ContactForm"],
     locales: ["zh-CN", "en"],
     designDirection: "清晰、专业、突出技术参数",
+    designTokens: {
+      color: { primary: "#0b6e4f", surface: "#f4f8f5", text: "#14231d" },
+      spacing: { unit: 4, section: 72 },
+      typography: { body: "system-ui", heading: "system-ui" },
+    },
     openQuestions: [],
     evidenceRefs: [],
     qaChecks: ["forms", "locale-links"],
@@ -76,6 +81,17 @@ test("Studio can run the Pi Supervisor workflow and read its persisted state", a
   assert.equal(result.body.status, "needs_input");
   assert.equal(result.body.artifacts[0].type, "SiteStrategy");
   assert.equal(run.strategy.strategy, "industrial-agentic");
+  assert.equal(run.strategy.designTokens.color.primary, "#0b6e4f");
+  run.pagePlan = {
+    routes: [{
+      page: "home",
+      route: "/",
+      components: [{ name: "Hero", registryId: "block_hero", source: { repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx" } }],
+    }],
+  };
+  const design = await request(server, "POST", `/runs/${run.id}/design-drafts`, apiToken, {});
+  assert.equal(design.status, 201);
+  assert.equal(design.body.designTokens.color.primary, "#0b6e4f");
   const status = await request(server, "GET", `/runs/${run.id}/agent`, apiToken);
   assert.equal(status.body.agentState.status, "needs_input");
   assert.equal(status.body.artifacts.length, 1);

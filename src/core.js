@@ -32,6 +32,11 @@ function deepFreeze(value) {
 }
 const SAFE_PROP = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
 const FORBIDDEN_PROP = /^(?:__proto__|prototype|constructor|dangerouslySetInnerHTML|html|script|javascript)$/i;
+const DEFAULT_DESIGN_TOKENS = Object.freeze({
+  color: Object.freeze({ primary: "#155eef", surface: "#ffffff", text: "#18212b" }),
+  spacing: Object.freeze({ unit: 4, section: 64 }),
+  typography: Object.freeze({ body: "system-ui", heading: "system-ui" }),
+});
 
 function assertBoundedJson(value, depth = 0) {
   if (depth > 5) throw new PolicyError("Design value is too deeply nested", "SCHEMA_REJECTED");
@@ -57,6 +62,32 @@ function assertBoundedJson(value, depth = 0) {
     return;
   }
   throw new PolicyError("Design value must be JSON data", "SCHEMA_REJECTED");
+}
+
+export function normalizeDesignTokens(value) {
+  if (value === undefined || value === null) return clone(DEFAULT_DESIGN_TOKENS);
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new PolicyError("Design tokens must be an object", "SCHEMA_REJECTED");
+  const groups = {
+    color: new Set(["primary", "surface", "text"]),
+    spacing: new Set(["unit", "section"]),
+    typography: new Set(["body", "heading"]),
+  };
+  for (const [group, entries] of Object.entries(value)) {
+    if (!groups[group] || !entries || typeof entries !== "object" || Array.isArray(entries)) throw new PolicyError("Unknown or invalid design token group", "SCHEMA_REJECTED");
+    for (const [key, token] of Object.entries(entries)) {
+      if (!groups[group].has(key)) throw new PolicyError(`Unsupported design token: ${group}.${key}`, "SCHEMA_REJECTED");
+      if (group === "color" && (typeof token !== "string" || !/^#[0-9a-f]{6}$/i.test(token))) throw new PolicyError(`Invalid color token: ${key}`, "SCHEMA_REJECTED");
+      if (group === "spacing" && (typeof token !== "number" || !Number.isFinite(token) || token < (key === "unit" ? 1 : 16) || token > (key === "unit" ? 32 : 240))) throw new PolicyError(`Invalid spacing token: ${key}`, "SCHEMA_REJECTED");
+      if (group === "typography" && (typeof token !== "string" || !/^[A-Za-z0-9 ,"'_-]{1,120}$/.test(token))) throw new PolicyError(`Invalid typography token: ${key}`, "SCHEMA_REJECTED");
+    }
+  }
+  const merged = {
+    color: { ...DEFAULT_DESIGN_TOKENS.color, ...(value.color || {}) },
+    spacing: { ...DEFAULT_DESIGN_TOKENS.spacing, ...(value.spacing || {}) },
+    typography: { ...DEFAULT_DESIGN_TOKENS.typography, ...(value.typography || {}) },
+  };
+  assertBoundedJson(merged);
+  return deepFreeze(merged);
 }
 
 function normalizePageTree(pageTree = []) {
@@ -210,12 +241,7 @@ export class SitePilotStore {
       const parent = this.designs.get(input.parentId);
       if (!parent || parent.runId !== runId) throw new PolicyError("Parent design draft does not belong to run", "POLICY_DENIED");
     }
-    const designTokens = input.designTokens && typeof input.designTokens === "object" ? clone(input.designTokens) : {
-      color: { primary: "#155eef", surface: "#ffffff", text: "#18212b" },
-      spacing: { unit: 4, section: 64 },
-      typography: { body: "system-ui", heading: "system-ui" },
-    };
-    assertBoundedJson(designTokens);
+    const designTokens = normalizeDesignTokens(input.designTokens ?? run.strategy?.designTokens);
     const openQuestions = Array.isArray(input.openQuestions) ? input.openQuestions.slice(0, 3).map((item) => ({
       field: String(item.field || "design"), question: String(item.question || "待确认设计细节"),
     })) : [];

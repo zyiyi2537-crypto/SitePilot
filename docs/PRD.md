@@ -326,7 +326,7 @@ SitePilot 提取产品字段后发现 5 个产品缺少认证材料，于是询�
 
 被调度的 Agent 各自使用独立的 Pi `Agent` 实例、system prompt、工具白名单、AgentRun ID、事件流和结构化 artifact；尚未接入调度器的角色只保留策略定义，不视为已运行。Supervisor 不能直接读写项目文件；它只能委派角色、请求客户输入、汇总观察或结束当前阶段。子 Agent 不共享无限增长的聊天记录，只能读取由服务端授予的输入 artifact，并返回新的不可变 artifact。
 
-首个真实闭环由服务端创建 Supervisor Agent。Supervisor 可以调用 `delegate_architect`、`delegate_research`、`request_customer_input` 和 `complete_plan`。Architect 只能产生 `SiteStrategy`，Research 只能通过固定 repository/commit 调用 CodeAtlas 只读检索并产生 `ComponentPlan`。任何角色尝试使用未登记工具必须在 Pi hook 和 SitePilot policy 两层被拒绝。模型输出不能提升 grant；Coding 的 L2 worktree、Payload 写入和生产相关能力在后续阶段单独接入。
+首个真实闭环由服务端创建 Supervisor Agent。Supervisor 可以调用 `delegate_architect`、`delegate_research`、`request_customer_input` 和 `complete_plan`。Architect 只能产生 `SiteStrategy` 及其受限的 `designTokens`；Research 只能通过固定 repository/commit 调用 CodeAtlas 只读检索并产生 `ComponentPlan`。策略中的视觉令牌会在创建设计草稿时传递，但客户或设计操作可以覆盖它并生成新的不可变版本。任何角色尝试使用未登记工具必须在 Pi hook 和 SitePilot policy 两层被拒绝。模型输出不能提升 grant；Coding 的 L2 worktree、Payload 写入和生产相关能力在后续阶段单独接入。
 
 运行轨迹只保存可审计的 `whyNow`、工具参数摘要、观察结果、风险、决策、artifact 引用和 policy version，不保存或展示模型隐式思维链。每个工具动作先进入 ToolRuntime journal；只读检索可以安全重放，未知副作用的动作必须中断并由新 AgentRun、幂等键和人工审阅恢复。
 
@@ -1332,7 +1332,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 |---|---|---|
 | SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
-| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy；页面视觉设计仍由现有设计草稿路径生成 | 将策略与设计草稿衔接，并验证真实客户反馈闭环 |
+| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板 | 接通受审组件到初步页面预览，并验证客户反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
 | Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research 的动态闭环、结构化决策和 Artifact 持久化；faux-provider 自动化测试通过，尚无真实在线模型多角色运行记录 | 先把这条闭环接入设计与 Payload 创建流程，再依次接入 ContentCMS、受限 Coding、QA 和独立 Review |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |

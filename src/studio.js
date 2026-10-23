@@ -179,6 +179,20 @@ function renderDesignDraft() {
     return;
   }
   status.textContent = `版本 ${designDraft.id} · hash ${designDraft.designHash.slice(0, 12)} · ${designDraft.openQuestions.length} 个待确认项`;
+  const tokens = designDraft.designTokens || {};
+  const summary = node("article", undefined, "design-summary");
+  summary.append(node("strong", "视觉方向"), node("p", currentRun?.strategy?.designDirection || "等待视觉方向"));
+  const palette = node("div", undefined, "design-palette");
+  for (const [key, label] of [["primary", "主色"], ["surface", "底色"], ["text", "文字"]]) {
+    const value = tokens.color?.[key];
+    if (!value) continue;
+    const swatch = node("span", undefined, "design-swatch");
+    swatch.style.backgroundColor = value;
+    swatch.setAttribute("aria-label", `${label} ${value}`);
+    palette.append(swatch, node("small", `${label} ${value}`));
+  }
+  summary.append(palette, node("small", `区块间距 ${tokens.spacing?.section ?? "默认"} px · 字体 ${tokens.typography?.heading || "默认"}`, "muted"));
+  target.append(summary);
   for (const page of designDraft.pageTree) {
     const card = node("article", undefined, "design-page");
     card.append(node("h3", `${page.page} · ${page.route}`));

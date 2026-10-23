@@ -1,6 +1,6 @@
 import { createPiTool } from "./agent-tools.js";
 import { createArtifact } from "./agent-roles.js";
-import { PolicyError, SitePilotStore, planStrategy } from "./core.js";
+import { PolicyError, SitePilotStore, normalizeDesignTokens, planStrategy } from "./core.js";
 import { planComponents } from "./component-planner.js";
 import { ToolRuntime } from "./tool-runtime.js";
 
@@ -11,7 +11,7 @@ function roleRunId(runId, role, count) {
 function promptForArchitect(run) {
   return JSON.stringify({
     task: "Create a website strategy for this customer request.",
-    output: "Call submit_site_strategy with audience, businessGoal, primaryConversion, pageHierarchy, blocks, locales, designDirection, openQuestions, evidenceRefs, qaChecks, and tradeoffs. Do not use plain text instead of the tool.",
+    output: "Call submit_site_strategy with audience, businessGoal, primaryConversion, pageHierarchy, blocks, locales, designDirection, optional bounded designTokens, openQuestions, evidenceRefs, qaChecks, and tradeoffs. Do not use plain text instead of the tool.",
     requirement: run.inputSnapshot,
   });
 }
@@ -98,6 +98,7 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
         blocks: state.strategy.blocks,
         locales: state.strategy.locales,
         designDirection: state.strategy.designDirection,
+        ...(state.strategy.designTokens ? { designTokens: normalizeDesignTokens(state.strategy.designTokens) } : {}),
         openQuestions: state.strategy.openQuestions,
         evidenceRefs: state.strategy.evidenceRefs,
         qa: state.strategy.qaChecks,

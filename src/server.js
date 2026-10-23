@@ -448,7 +448,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const run = store.runs.get(designDraftMatch[1]);
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
-        const draft = store.createDesignDraft(run.id, await readJson(req));
+        const input = await readJson(req);
+        const draft = store.createDesignDraft(run.id, {
+          ...input,
+          designTokens: input.designTokens || run.strategy?.designTokens,
+        });
         store.persist?.();
         return send(res, 201, draft);
       }
