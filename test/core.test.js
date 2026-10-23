@@ -333,17 +333,21 @@ test("quality checks fail closed when a check has no result", async () => {
 
 test("Payload sandbox drafts are bounded and idempotent", async () => {
   let calls = 0;
+  let intent;
   const adapter = new PayloadSandboxAdapter({
-    backend: { apply: async () => { calls += 1; return { snapshotId: "cms_snapshot_1", recordRefs: ["page_home"], diff: ["pages/home"] }; } },
+    backend: { apply: async (input) => { calls += 1; intent = input; return { snapshotId: "cms_snapshot_1", recordRefs: ["page_home"], diff: ["pages/home"] }; } },
   });
-  const input = { candidateId: "candidate_1", expectedCmsSnapshot: "cms_snapshot_0", idempotencyKey: "idem_1", pageOperations: [{ type: "upsert_page", collection: "pages", locale: "zh-CN", data: { slug: "home", title: "首页" } }] };
+  const input = { candidateId: "candidate_1", expectedCmsSnapshot: "cms_snapshot_0", idempotencyKey: "idem_1", designDraftId: "design_1", designHash: "a".repeat(64), pageOperations: [{ type: "upsert_page", collection: "pages", locale: "zh-CN", data: { slug: "home", title: "首页" } }] };
   const first = await adapter.createDraft(input);
   const second = await adapter.createDraft(input);
   assert.deepEqual(first, second);
   assert.equal(calls, 1);
+  assert.equal(intent.designDraftId, "design_1");
+  assert.equal(first.designHash, "a".repeat(64));
   assert.equal(first.createsDraftVersion, false);
   await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_2", environment: "production" }), /sandbox environment/);
-  await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_3", pageOperations: [{ type: "upsert_page", collection: "pages", data: { apiToken: "secret" } }] }), /Secrets/);
+  await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_3", designHash: undefined }), /provided together/);
+  await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_4", pageOperations: [{ type: "upsert_page", collection: "pages", data: { apiToken: "secret" } }] }), /Secrets/);
 });
 
 test("Payload schema planner creates only strategy-approved draft models", () => {
@@ -482,10 +486,12 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
     token: "sandbox-token",
     fetchImpl: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ doc: { id: "page_1" } }) }; },
   });
-  const result = await backend.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] });
+  const result = await backend.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", designDraftId: "design_1", designHash: "a".repeat(64), operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] });
   assert.equal(result.recordRefs[0].id, "page_1");
   assert.equal(requests[0].options.method, "POST");
   assert.match(requests[0].options.body, /"_status":"draft"/);
+  assert.equal(requests[0].options.headers["x-sitepilot-design-draft"], "design_1");
+  assert.equal(requests[0].options.headers["x-sitepilot-design-hash"], "a".repeat(64));
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://insecure.test", token: "x" }), /HTTPS/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://127.0.0.1", token: "x" }), /private or reserved/);
 });

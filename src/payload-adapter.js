@@ -22,15 +22,22 @@ export class PayloadHttpSandboxBackend {
     this.allowedCollections = new Set(allowedCollections);
   }
 
-  async apply({ candidateId, expectedCmsSnapshot, operations, requestHash }) {
+  async apply({ candidateId, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash }) {
     const records = [];
     for (const operation of operations) {
       if (!this.allowedCollections.has(operation.collection)) throw new PolicyError(`Payload collection is not allowed: ${operation.collection}`, "POLICY_DENIED");
       const body = { ...operation.data, _sitepilotCandidateId: candidateId, _sitepilotRequestHash: requestHash };
       const endpoint = `${this.baseUrl}/api/${encodeURIComponent(operation.collection)}`;
+      const headers = {
+        authorization: `Bearer ${this.token}`,
+        "content-type": "application/json",
+        "x-sitepilot-cms-snapshot": expectedCmsSnapshot,
+      };
+      if (designDraftId) headers["x-sitepilot-design-draft"] = designDraftId;
+      if (designHash) headers["x-sitepilot-design-hash"] = designHash;
       const response = await this.fetch(endpoint, {
         method: "POST",
-        headers: { authorization: `Bearer ${this.token}`, "content-type": "application/json", "x-sitepilot-cms-snapshot": expectedCmsSnapshot },
+        headers,
         body: JSON.stringify({ ...body, _status: "draft", locale: operation.locale }),
       });
       if (!response.ok) throw new PolicyError(`Payload sandbox rejected ${operation.collection}: HTTP ${response.status}`, "CMS_REJECTED");
@@ -54,22 +61,27 @@ export class PayloadSandboxAdapter {
     this.receipts = new Map();
   }
 
-  async createDraft({ candidateId, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox" } = {}) {
+  async createDraft({ candidateId, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash } = {}) {
     if (!candidateId || !expectedCmsSnapshot) throw new PolicyError("candidate_id and expected CMS snapshot are required", "INVALID_INPUT");
     if (!idempotencyKey || typeof idempotencyKey !== "string") throw new PolicyError("idempotency_key is required", "INVALID_INPUT");
     if (environment !== "sandbox") throw new PolicyError("Payload writes are limited to the sandbox environment", "POLICY_DENIED");
-    const requestHash = hash({ candidateId, expectedCmsSnapshot, pageOperations, environment });
+    if ((designDraftId && !designHash) || (!designDraftId && designHash)) throw new PolicyError("designDraftId and designHash must be provided together", "INVALID_INPUT");
+    if (designDraftId !== undefined && (typeof designDraftId !== "string" || !designDraftId || designDraftId.length > 128)) throw new PolicyError("designDraftId is invalid", "INVALID_INPUT");
+    if (designHash !== undefined && (typeof designHash !== "string" || !/^[a-f0-9]{64}$/i.test(designHash))) throw new PolicyError("designHash is invalid", "INVALID_INPUT");
+    const requestHash = hash({ candidateId, expectedCmsSnapshot, pageOperations, environment, designDraftId: designDraftId || null, designHash: designHash || null });
     const previous = this.receipts.get(idempotencyKey);
     if (previous) {
       if (previous.requestHash !== requestHash) throw new PolicyError("Idempotency key was reused with different input", "IDEMPOTENCY_CONFLICT");
       return previous.receipt;
     }
     this.validateOperations(pageOperations);
-    const intent = { candidateId, expectedCmsSnapshot, operations: pageOperations, requestHash };
+    const intent = { candidateId, expectedCmsSnapshot, operations: pageOperations, requestHash, designDraftId: designDraftId || null, designHash: designHash || null };
     const result = await this.backend.apply(intent);
     if (!result || typeof result.snapshotId !== "string") throw new PolicyError("Payload backend returned no snapshot receipt", "UNKNOWN_RESULT");
     const receipt = Object.freeze({
       candidateId,
+      designDraftId: designDraftId || null,
+      designHash: designHash || null,
       cmsSnapshotId: result.snapshotId,
       cmsRecordRefs: result.recordRefs || [],
       diff: result.diff || [],

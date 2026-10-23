@@ -109,16 +109,26 @@ test("Payload API only creates sandbox drafts after quality gates", async () => 
   const store = new SitePilotStore();
   const token = "a".repeat(32);
   const calls = [];
-  const payload = { createDraft: async (input) => { calls.push(input); return { candidateId: input.candidateId, cmsSnapshotId: "payload_1", status: "sandbox_draft" }; } };
+  const payload = { createDraft: async (input) => { calls.push(input); return { candidateId: input.candidateId, designDraftId: input.designDraftId, designHash: input.designHash, cmsSnapshotId: "payload_1", status: "sandbox_draft" }; } };
   const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, payload);
   const project = store.createProject({ goal: "website" });
   const run = store.createRun(project.id);
-  const candidate = store.createCandidate(run.id, {});
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const candidate = store.createCandidate(run.id, { designDraftId: design.id });
   assert.equal((await request(server, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "k", pageOperations: [] })).status, 422);
   store.markQuality(candidate.id, { passed: true });
   const result = await request(server, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "k", pageOperations: [] });
   assert.equal(result.status, 201);
   assert.equal(calls[0].environment, "sandbox");
+  assert.equal(calls[0].designDraftId, design.id);
+  assert.equal(calls[0].designHash, design.designHash);
+  assert.equal(result.body.designDraftId, design.id);
+  assert.equal(result.body.designHash, design.designHash);
+  const badServer = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, { createDraft: async () => ({ cmsSnapshotId: "payload_bad" }) });
+  const mismatch = await request(badServer, "POST", `/candidates/${candidate.id}/payload-draft`, token, { expectedCmsSnapshot: "cms_0", idempotencyKey: "bad", pageOperations: [] });
+  assert.equal(mismatch.status, 422);
+  assert.equal(store.candidates.get(candidate.id).cmsSnapshot.cmsSnapshotId, "payload_1");
 });
 
 test("QA API records signed quality result on candidate", async () => {

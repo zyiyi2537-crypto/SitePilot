@@ -1,6 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
-import { SitePilotStore, planStrategy } from "./core.js";
+import { SitePilotStore, PolicyError, planStrategy } from "./core.js";
 import { JsonSitePilotStore, SqliteSitePilotStore } from "./persistence.js";
 import { EvidenceStore, JsonEvidenceStore, SqliteEvidenceStore } from "./evidence.js";
 import { planPayloadSchema } from "./payload-schema.js";
@@ -292,7 +292,18 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         if (!candidate.quality?.passed) return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
         const input = await readJson(req);
-        const receipt = await payload.createDraft({ ...input, candidateId: candidate.id, environment: "sandbox" });
+        const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        if (candidate.designDraftId && !design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+        const receipt = await payload.createDraft({
+          ...input,
+          candidateId: candidate.id,
+          designDraftId: design?.id || null,
+          designHash: design?.designHash || null,
+          environment: "sandbox",
+        });
+        if (design && (receipt?.designDraftId !== design.id || receipt?.designHash !== design.designHash)) {
+          throw new PolicyError("Payload snapshot did not preserve the bound design revision", "STALE_REVISION");
+        }
         candidate.cmsSnapshot = receipt;
         store.event(candidate.runId, "payload.draft.created", { candidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
         return send(res, 201, receipt);
