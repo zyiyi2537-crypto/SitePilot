@@ -16,6 +16,7 @@ SitePilot is an evidence-driven website delivery system organized around a Super
 - Payload draft planning requires explicit page content and Claim references; it never invents customer copy. The pinned template has no localization configuration, so multi-locale draft creation is reported as a template capability gap until the schema and frontend are deliberately extended.
 - To verify a locally running, isolated Payload Website Template, set `PAYLOAD_LOCAL_EMAIL` and `PAYLOAD_LOCAL_PASSWORD`, then run `npm run payload:sandbox-smoke`. The test only accepts `http://127.0.0.1` or `http://[::1]`, creates a uniquely named synthetic unpublished page, verifies REST readback and anonymous draft isolation, and leaves that draft in the local sandbox. It does not enable local HTTP in the SitePilot server or permit production writes.
 - Studio's authenticated `GET /payload/status` checks the server-side Payload sandbox connection without exposing its URL or token. It reports only `not_configured`, `unchecked`, `connected`, `rejected`, or `unreachable`; the API always declares draft-only writes and `publishAllowed: false`.
+- The Payload GitHub Actions acceptance now starts a temporary SitePilot API beside the real ephemeral Payload Website Template, checks `/payload/status`, creates a synthetic draft through `/candidates/:id/payload-draft`, and verifies REST readback plus anonymous draft isolation. The receipt is uploaded as CI evidence; it is not customer data or a production deployment.
 
 ## Current implementation
 
