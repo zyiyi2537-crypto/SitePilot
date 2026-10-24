@@ -1334,7 +1334,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
 | 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板 | 接通受审组件到初步页面预览，并验证客户反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
-| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；新增候选绑定的 Supervisor→ContentCMS 草案阶段，校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel；L0 阶段不能调用 L1 Payload 写工具。faux-provider 自动化测试通过，尚无真实在线模型多角色运行记录 | 完成人工确认的服务端绑定与 Payload 提交闭环，再接入受限 Coding、QA 和独立 Review |
+| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；新增候选绑定的 Supervisor→ContentCMS 草案阶段，校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel；L0 阶段不能调用 L1 Payload 写工具。独立 reviewer 凭据可批准精确 candidate/design/content hash，Payload 写入校验审批且拒绝修改后的内容。faux-provider 与授权闭环自动化测试通过，尚无真实在线模型多角色运行记录 | 接入受限 Coding、QA 和独立 Review，并完成带真实 Payload 沙箱的 Agent 内容端到端验收 |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |

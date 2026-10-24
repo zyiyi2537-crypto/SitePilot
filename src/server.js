@@ -62,6 +62,17 @@ function modelConfigFromInput(input = {}) {
   return { baseUrl, model, apiKey, apiMode };
 }
 
+function contentModelHash(model = {}) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    candidateId: model.candidateId || null,
+    candidateHash: model.candidateHash || null,
+    designDraftId: model.designDraftId || null,
+    designHash: model.designHash || null,
+    pagePlanHash: model.pagePlanHash || null,
+    contentByPage: model.contentByPage || null,
+  })).digest("hex");
+}
+
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter, agentModelRuntimeFactory = createPiModelRuntime, agentToolJournal = null) {
   intake = intake || createIntakeAdapterFromEnvironment();
   const environmentIntake = intake;
@@ -112,6 +123,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (apiToken.length < 32 || reviewerToken.length < 32 || !reviewerId || apiToken === reviewerToken) return send(res, 503, { code: "AUTH_NOT_CONFIGURED", message: "Distinct 32-character API and reviewer credentials are required" });
       const authorization = req.headers.authorization || "";
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
+      const contentApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/content-approval$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
@@ -123,7 +135,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
+      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -306,6 +318,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
           const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms });
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
+          const returnedContentModel = result.contentModel || (contentCms?.candidate ? run.contentModel : null);
+          if (returnedContentModel) {
+            const model = returnedContentModel.status === "proposed"
+              ? { ...returnedContentModel, contentHash: contentModelHash(returnedContentModel) }
+              : returnedContentModel;
+            run.contentModel = model;
+            if (contentCms?.candidate) contentCms.candidate.contentModel = model;
+            result.contentModel = model;
+          }
           store.persist?.();
           return send(res, 200, result);
         } finally {
@@ -608,6 +629,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const autoPlan = input.contentByPage !== undefined || input.usePayloadPlan === true || input.pageOperations === undefined;
         let plan = null;
         let pageOperations = input.pageOperations;
+        const boundAgentModel = candidate.contentModel || (run?.contentModel?.candidateId === candidate.id ? run.contentModel : null);
+        if (input.useAgentContent === true || boundAgentModel) {
+          const model = boundAgentModel;
+          const approval = candidate.contentApproval;
+          if (!model || model.status !== "proposed" || !model.contentHash) return send(res, 422, { code: "CONTENT_MODEL_REQUIRED" });
+          if (!approval || approval.candidateId !== candidate.id || approval.candidateHash !== candidate.candidateHash || approval.designDraftId !== design?.id || approval.designHash !== design?.designHash || approval.contentHash !== model.contentHash) return send(res, 422, { code: "CONTENT_APPROVAL_REQUIRED" });
+          if (JSON.stringify(input.contentByPage || null) !== JSON.stringify(model.contentByPage)) return send(res, 409, { code: "CONTENT_MODEL_CHANGED" });
+          input.contentByPage = model.contentByPage;
+        }
         if (autoPlan) {
           if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!run?.strategy) return send(res, 422, { code: "STRATEGY_REQUIRED" });
@@ -670,6 +700,24 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.persist?.();
         store.event(candidate.runId, "payload.draft.created", { candidateId: revision.id, parentCandidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
         return send(res, existing ? 200 : 201, { ...receipt, candidate: revision, ...(autoPlan ? { plan } : {}), parentCandidateId: candidate.id });
+      }
+      if (req.method === "POST" && contentApprovalMatch) {
+        const candidate = store.candidates.get(contentApprovalMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        const input = await readJson(req);
+        if (input.approved !== true) return send(res, 422, { code: "CONTENT_REVIEW_NOT_APPROVED" });
+        const model = candidate.contentModel || (run?.contentModel?.candidateId === candidate.id ? run.contentModel : null);
+        if (!model || model.status !== "proposed" || !model.contentHash) return send(res, 422, { code: "CONTENT_MODEL_REQUIRED" });
+        if (model.candidateId !== candidate.id || model.candidateHash !== candidate.candidateHash || model.designDraftId !== design?.id || model.designHash !== design?.designHash) return send(res, 409, { code: "STALE_REVISION" });
+        const expectedHash = contentModelHash(model);
+        if (model.contentHash !== expectedHash || input.expectedContentHash !== expectedHash) return send(res, 409, { code: "CONTENT_MODEL_CHANGED" });
+        candidate.contentApproval = Object.freeze({ candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: design.id, designHash: design.designHash, contentHash: expectedHash, approvedBy: reviewerId, approvedAt: new Date().toISOString() });
+        if (run) run.checkpoint = "content_approved";
+        store.event(candidate.runId, "content-model.approved", { candidateId: candidate.id, contentHash: expectedHash, approvedBy: reviewerId });
+        store.persist?.();
+        return send(res, 201, { candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: design.id, designHash: design.designHash, contentHash: expectedHash, approvedBy: reviewerId, status: "approved" });
       }
       const qaMatch = url.pathname.match(/^\/candidates\/([^/]+)\/qa$/);
       if (req.method === "POST" && qaMatch) {

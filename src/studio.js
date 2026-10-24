@@ -123,6 +123,12 @@ async function showRun() {
   designDraft = designResult.designs.at(-1) || null;
   const { candidates } = await api("GET", "/candidates");
   currentCandidate = run.candidateIds?.length ? candidates.find((candidate) => candidate.id === run.candidateIds.at(-1)) || null : null;
+  if (currentCandidate?.contentModel) {
+    $("#payload-content").value = JSON.stringify(currentCandidate.contentModel.contentByPage || {}, null, 2);
+    $("#payload-content").readOnly = true;
+  } else {
+    $("#payload-content").readOnly = false;
+  }
   currentPreview = null;
   const details = node("dl");
   for (const [label, value] of [["Run", run.id], ["状态", run.checkpoint], ["策略", run.strategy?.strategy || "待生成"], ["页面", (run.strategy?.pageHierarchy || []).join(", ")]]) {
@@ -180,9 +186,13 @@ function renderDelivery(result) {
   }
   const hasPlan = Boolean(currentRun?.pagePlan && designDraft);
   const alreadyGenerated = currentRun?.candidateIds?.some((id) => currentCandidate?.id === id && currentCandidate.designDraftId === designDraft?.id);
+  const isCurrentCandidate = Boolean(currentCandidate && currentCandidate.designDraftId === currentRun?.designDraftId);
   $("#create-candidate").disabled = !hasPlan || Boolean(alreadyGenerated);
-  $("#generate-content").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
-  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot) || !$("#content-reviewed").checked;
+  $("#generate-content").disabled = !isCurrentCandidate || !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
+  const contentApprovalRequired = currentRun?.contentModel?.status === "proposed" && currentRun.contentModel.candidateId === currentCandidate?.id;
+  const contentApproved = currentCandidate?.contentApproval?.contentHash === currentRun?.contentModel?.contentHash;
+  $("#approve-content").disabled = !contentApprovalRequired || contentApproved || !currentCandidate?.build?.passed;
+  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot) || !$("#content-reviewed").checked || (contentApprovalRequired && !contentApproved);
   $("#start-preview").disabled = !currentCandidate?.build?.passed;
   $("#run-qa").disabled = !currentCandidate || !currentPreview;
   if (!currentCandidate) status.textContent = hasPlan ? "设计已就绪，可以生成代码候选。" : "需要先生成页面计划和设计草稿。";
@@ -445,6 +455,13 @@ $("#generate-content").onclick = () => action(async () => {
     return result.status === "needs_input" ? "内容 Agent 发现缺少事实资料，已返回待补问题" : "内容草案已生成，请核对 Claim 引用后再提交 CMS";
   } finally { button.textContent = "Agent 生成内容草案"; }
 });
+$("#approve-content").onclick = () => action(async () => {
+  if (!currentCandidate || !currentRun?.contentModel?.contentHash) throw new Error("请先生成内容草案");
+  $("#review-token-field").style.display = "grid";
+  const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/content-approval`, { approved: true, expectedContentHash: currentRun.contentModel.contentHash }, "reviewer");
+  await showRun();
+  return `内容已由 ${result.approvedBy} 审核并绑定到当前候选`;
+});
 $("#content-reviewed").onchange = () => renderDelivery();
 $("#payload-content").oninput = () => { $("#content-reviewed").checked = false; renderDelivery(); };
 $("#create-payload").onclick = () => action(async () => {
@@ -457,6 +474,7 @@ $("#create-payload").onclick = () => action(async () => {
     expectedCmsSnapshot: $("#payload-snapshot").value.trim(),
     idempotencyKey: $("#payload-idempotency").value.trim(),
     contentByPage,
+    useAgentContent: Boolean(currentCandidate.contentApproval && currentRun?.contentModel?.contentHash),
   });
   currentCandidate = receipt.candidate;
   currentPreview = null;

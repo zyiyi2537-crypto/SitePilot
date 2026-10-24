@@ -276,7 +276,8 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
         toolRuntime,
         handler: ({ collection }) => {
           if (collection !== "pages") throw new PolicyError("ContentCMS may inspect only the approved pages collection", "POLICY_DENIED");
-          return { collection, schema: contentCms.payloadSchema || { collection: "pages", status: "sandbox_only", required: ["title", "hero", "claimRefs"] } };
+          const pageSchema = contentCms.payloadSchema?.collections?.find((item) => item.name === "pages") || { name: "pages", fields: [{ name: "slug", type: "text", required: true }, { name: "title", type: "text", required: true }, { name: "hero", type: "group" }, { name: "blocks", type: "blocks" }, { name: "seo", type: "group" }, { name: "status", type: "select", required: true }] };
+          return { collection, schema: { schemaVersion: contentCms.payloadSchema?.schemaVersion || "payload-schema-v1", collection: pageSchema, rules: contentCms.payloadSchema?.rules || { draftOnly: true, publishAllowed: false } } };
         },
       });
       const submitModel = createPiTool({

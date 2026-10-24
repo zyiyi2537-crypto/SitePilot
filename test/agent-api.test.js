@@ -10,6 +10,7 @@ import {
 import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
 import { createPiTool } from "../src/agent-tools.js";
+import { computePayloadRequestHash } from "../src/payload-adapter.js";
 
 const apiToken = "a".repeat(32);
 const reviewerToken = "b".repeat(32);
@@ -162,8 +163,49 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   assert.deepEqual(result.body.contentModel.contentByPage.home.claimRefs, [claim.id]);
   assert.equal(result.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 1);
   assert.equal(candidate.cmsSnapshot, null);
+  assert.equal(candidate.contentModel.contentHash, result.body.contentModel.contentHash);
+
+  let payloadWrites = 0;
+  const payloadServer = createServer(store, { apiToken, reviewerToken, reviewerId: "reviewer" }, evidence, undefined, null, {
+    createDraft: async (input) => {
+      payloadWrites += 1;
+      return {
+        candidateId: input.candidateId,
+        candidateHash: input.candidateHash,
+        designDraftId: input.designDraftId,
+        designHash: input.designHash,
+        designMappings: input.designMappings,
+        cmsSnapshotId: "cms_agent_1",
+        idempotencyKey: input.idempotencyKey,
+        requestHash: computePayloadRequestHash(input),
+        status: "sandbox_draft",
+      };
+    },
+  });
+  const unapprovedWrite = await request(payloadServer, "POST", `/candidates/${candidate.id}/payload-draft`, apiToken, {
+    expectedCmsSnapshot: "cms_0", idempotencyKey: "agent-content-1", contentByPage: result.body.contentModel.contentByPage, useAgentContent: false,
+  });
+  assert.equal(unapprovedWrite.status, 422);
+  assert.equal(unapprovedWrite.body.code, "CONTENT_APPROVAL_REQUIRED");
+  assert.equal(payloadWrites, 0);
+  const wrongCredential = await request(payloadServer, "POST", `/candidates/${candidate.id}/content-approval`, apiToken, { approved: true, expectedContentHash: result.body.contentModel.contentHash });
+  assert.equal(wrongCredential.status, 401);
+  const approval = await request(payloadServer, "POST", `/candidates/${candidate.id}/content-approval`, reviewerToken, { approved: true, expectedContentHash: result.body.contentModel.contentHash });
+  assert.equal(approval.status, 201);
+  assert.equal(approval.body.status, "approved");
+  const tamperedWrite = await request(payloadServer, "POST", `/candidates/${candidate.id}/payload-draft`, apiToken, {
+    expectedCmsSnapshot: "cms_0", idempotencyKey: "agent-content-2", contentByPage: { home: { ...result.body.contentModel.contentByPage.home, heroTitle: "changed" } }, useAgentContent: false,
+  });
+  assert.equal(tamperedWrite.status, 409);
+  assert.equal(tamperedWrite.body.code, "CONTENT_MODEL_CHANGED");
+  const approvedWrite = await request(payloadServer, "POST", `/candidates/${candidate.id}/payload-draft`, apiToken, {
+    expectedCmsSnapshot: "cms_0", idempotencyKey: "agent-content-3", contentByPage: result.body.contentModel.contentByPage, useAgentContent: true,
+  });
+  assert.equal(approvedWrite.status, 201);
+  assert.equal(payloadWrites, 1);
 
   const untrustedCandidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: { designHash: design.designHash } });
+  const payloadDraftEventsBeforeBlockedRun = store.audit.filter((event) => event.runId === run.id && event.type === "payload.draft.created").length;
   faux.setResponses([
     fauxAssistantMessage(fauxToolCall("delegate_content_cms", { whyNow: "需要校验候选内容", expectedObservation: "输出设计版本绑定的内容模型", stopIf: ["证据不足"], risk: "medium" }), { stopReason: "toolUse" }),
     fauxAssistantMessage(fauxToolCall("inspect_payload_schema", { collection: "pages" }), { stopReason: "toolUse" }),
@@ -173,8 +215,9 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   const blocked = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "content", candidateId: untrustedCandidate.id, allowedClaimRefs: ["claim_forged"] });
   assert.equal(blocked.status, 200);
   assert.equal(blocked.body.status, "needs_input");
+  assert.equal(untrustedCandidate.contentModel.status, "needs_input");
   assert.equal(untrustedCandidate.cmsSnapshot, null);
-  assert.equal(store.audit.some((event) => event.runId === run.id && event.type === "payload.draft.created"), false);
+  assert.equal(store.audit.filter((event) => event.runId === run.id && event.type === "payload.draft.created").length, payloadDraftEventsBeforeBlockedRun);
   assert.equal(blocked.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 2);
 });
 
