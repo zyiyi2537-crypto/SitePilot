@@ -73,6 +73,20 @@ async function loadModelStatus() {
   return status;
 }
 
+async function loadPayloadStatus() {
+  const status = await api("GET", "/payload/status");
+  const label = $("#payload-status");
+  const messages = {
+    not_configured: "Payload 沙箱未配置；CMS 写入不可用。",
+    unchecked: "Payload 沙箱已配置，但当前适配器未提供连接检查。",
+    connected: "Payload 沙箱已连接 · 仅允许草稿写入 · 正式发布关闭。",
+    rejected: "Payload 沙箱已配置，但认证失败；请检查服务端凭据。",
+    unreachable: "Payload 沙箱已配置，但当前不可达；请检查服务端地址和网络。",
+  };
+  label.textContent = messages[status.connection] || "Payload 沙箱状态未知。";
+  return status;
+}
+
 async function selectProject(id, reloadList = true) {
   projectId = id;
   const { runs } = await api("GET", `/projects/${encodeURIComponent(id)}/runs`);
@@ -339,7 +353,7 @@ async function loadReviews() {
   if (!list.children.length) list.append(node("p", "暂无候选交付", "muted"));
 }
 
-$("#connect").onclick = () => action(async () => { await loadProjects(); await loadModelStatus(); if (!$("#review-view").hidden) await loadReviews(); });
+$("#connect").onclick = () => action(async () => { await loadProjects(); await loadModelStatus(); await loadPayloadStatus(); if (!$("#review-view").hidden) await loadReviews(); });
 $("#model-test").onclick = () => action(async () => {
   const result = await api("POST", "/model/test", modelConfigFromForm());
   return `模型连接成功：${result.model} · ${result.apiMode === "codex_responses" ? "Responses" : "Chat Completions"}`;
@@ -360,7 +374,7 @@ $("#model-clear").onclick = () => action(async () => {
 });
 $("#review-token-field").style.display = "none";
 $("#l2-token-field").style.display = "none";
-$("#refresh").onclick = () => action(loadProjects);
+$("#refresh").onclick = () => action(async () => { await loadProjects(); await loadPayloadStatus(); });
 $("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
 $("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };

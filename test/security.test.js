@@ -10,7 +10,7 @@ import { BuildExecutor, DockerSandboxRunner } from "../src/build-executor.js";
 import { LocalPreviewServer } from "../src/preview-server.js";
 import { PlaywrightPreviewAdapter } from "../src/playwright-preview.js";
 import { QualityAdapter } from "../src/quality-adapter.js";
-import { computePayloadRequestHash } from "../src/payload-adapter.js";
+import { computePayloadRequestHash, PayloadHttpSandboxBackend } from "../src/payload-adapter.js";
 import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 import { BlockRegistry } from "../src/registry.js";
@@ -43,6 +43,51 @@ test("HTTP API rejects anonymous writes and exposes no quality decision route", 
   const quality = await request(server, "POST", "/candidates/fake/quality", "a".repeat(32), { passed: true });
   assert.equal(quality.status, 404);
   assert.equal(store.candidates.size, 0);
+});
+
+test("Payload status is authenticated, bounded, and does not expose CMS credentials", async () => {
+  const store = new SitePilotStore();
+  const apiToken = "a".repeat(32);
+  const secret = "payload-secret-do-not-leak";
+  const server = createServer(store, { apiToken, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, {
+    checkConnection: async () => ({ state: "connected", token: secret, baseUrl: "https://cms.example.test" }),
+  });
+  assert.equal((await request(server, "GET", "/payload/status", null)).status, 401);
+  const response = await request(server, "GET", "/payload/status", apiToken);
+  assert.equal(response.status, 200);
+  assert.deepEqual(Object.keys(response.body).sort(), ["checkedAt", "configured", "connection", "publishAllowed", "sandboxOnly", "writeMode"].sort());
+  assert.equal(response.body.connection, "connected");
+  assert.equal(response.body.configured, true);
+  assert.equal(response.body.publishAllowed, false);
+  assert.equal(response.body.writeMode, "draft_only");
+  assert.equal(Number.isNaN(Date.parse(response.body.checkedAt)), false);
+  assert.equal(JSON.stringify(response.body).includes(secret), false);
+
+  const unconfigured = createServer(new SitePilotStore(), { apiToken, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" });
+  const missing = await request(unconfigured, "GET", "/payload/status", apiToken);
+  assert.equal(missing.status, 200);
+  assert.deepEqual(missing.body, { configured: false, connection: "not_configured", sandboxOnly: true, writeMode: "draft_only", publishAllowed: false });
+});
+
+test("Payload HTTP connection probe never exposes token and classifies failures", async () => {
+  const token = "payload-test-token";
+  const calls = [];
+  const ok = new PayloadHttpSandboxBackend({ baseUrl: "https://cms.example.test/", token, fetchImpl: async (url, options) => {
+    calls.push({ url, options });
+    return { ok: true, status: 200 };
+  } });
+  assert.deepEqual(await ok.checkConnection(), { state: "connected" });
+  assert.equal(calls[0].url, "https://cms.example.test/api/users/me");
+  assert.equal(calls[0].options.headers.authorization, `Bearer ${token}`);
+
+  const rejected = new PayloadHttpSandboxBackend({ baseUrl: "https://cms.example.test", token, fetchImpl: async () => ({ ok: false, status: 401 }) });
+  assert.deepEqual(await rejected.checkConnection(), { state: "rejected" });
+  const failed = new PayloadHttpSandboxBackend({ baseUrl: "https://cms.example.test", token, fetchImpl: async () => { throw new Error(`network ${token}`); } });
+  assert.deepEqual(await failed.checkConnection(), { state: "unreachable" });
+  const timedOut = new PayloadHttpSandboxBackend({ baseUrl: "https://cms.example.test", token, requestTimeoutMs: 250, fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+    options.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+  }) });
+  assert.deepEqual(await timedOut.checkConnection(), { state: "unreachable" });
 });
 
 test("review requires separate credential and uses server-side reviewer identity", async () => {

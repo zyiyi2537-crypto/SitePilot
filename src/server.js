@@ -128,6 +128,20 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
       }
+      if (req.method === "GET" && url.pathname === "/payload/status") {
+        const status = { configured: Boolean(payload), connection: payload ? "unchecked" : "not_configured", sandboxOnly: true, writeMode: "draft_only", publishAllowed: false };
+        if (payload && typeof payload.checkConnection === "function") {
+          try {
+            const result = await payload.checkConnection();
+            status.connection = ["connected", "rejected", "unreachable"].includes(result?.state) ? result.state : "unreachable";
+            status.checkedAt = new Date().toISOString();
+          } catch {
+            status.connection = "unreachable";
+            status.checkedAt = new Date().toISOString();
+          }
+        }
+        return send(res, 200, status);
+      }
       if (req.method === "POST" && url.pathname === "/model/test") {
         const config = modelConfigFromInput(await readJson(req));
         const candidate = modelAdapterFactory(config);

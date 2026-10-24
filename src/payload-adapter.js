@@ -34,7 +34,7 @@ function payloadFieldsMatch(actual, expected) {
 }
 
 export class PayloadHttpSandboxBackend {
-  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, allowLocalSandbox = false, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
+  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, allowLocalSandbox = false, requestTimeoutMs = 5000, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
     if (!baseUrl || !token || typeof fetchImpl !== "function") throw new PolicyError("Payload sandbox URL, token and fetch are required", "CONFIG_REQUIRED");
     const parsed = new URL(baseUrl);
     if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new PolicyError("Payload sandbox URL cannot contain credentials, query or fragment", "POLICY_DENIED");
@@ -45,7 +45,27 @@ export class PayloadHttpSandboxBackend {
     this.baseUrl = parsed.href.replace(/\/$/, "");
     this.token = token;
     this.fetch = fetchImpl;
+    this.requestTimeoutMs = Number.isInteger(requestTimeoutMs) && requestTimeoutMs >= 250 && requestTimeoutMs <= 30000 ? requestTimeoutMs : 5000;
     this.allowedCollections = new Set(allowedCollections);
+  }
+
+  async checkConnection() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    try {
+      const response = await this.fetch(`${this.baseUrl}/api/users/me`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${this.token}` },
+        signal: controller.signal,
+      });
+      if (response.ok) return { state: "connected" };
+      if ([401, 403].includes(response.status)) return { state: "rejected" };
+      return { state: "unreachable" };
+    } catch {
+      return { state: "unreachable" };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   async apply({ candidateId, candidateHash, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash, designMappings }) {
@@ -132,6 +152,12 @@ export class PayloadSandboxAdapter {
     this.allowedCollections = new Set(allowedCollections);
     this.receipts = new Map();
     this.pending = new Map();
+  }
+
+  async checkConnection() {
+    if (typeof this.backend.checkConnection !== "function") return { state: "unchecked" };
+    const result = await this.backend.checkConnection();
+    return { state: ["connected", "rejected", "unreachable"].includes(result?.state) ? result.state : "unreachable" };
   }
 
   async createDraft({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash, designMappings } = {}) {
