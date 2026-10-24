@@ -560,6 +560,12 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
   await assert.rejects(() => mismatchingReadback.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] }), /readback differs/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://insecure.test", token: "x" }), /HTTPS/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://127.0.0.1", token: "x" }), /private or reserved/);
+  assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://[::1]", token: "x" }), /private or reserved/);
+  assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://127.0.0.1:3000", token: "x" }), /loopback HTTP/);
+  assert.doesNotThrow(() => new PayloadHttpSandboxBackend({ baseUrl: "http://127.0.0.1:3000", token: "x", allowLocalSandbox: true }));
+  assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://10.0.0.8:3000", token: "x", allowLocalSandbox: true }), /HTTPS/);
+  assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://localhost:3000", token: "x", allowLocalSandbox: true }), /HTTPS/);
+  assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://example.test/path?token=leak", token: "x" }), /credentials, query or fragment/);
 });
 
 test("quality checks bind to candidate hash and never promote delivery preview", async () => {

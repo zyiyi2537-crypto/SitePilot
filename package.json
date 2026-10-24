@@ -10,6 +10,7 @@
     "codeatlas:probe": "node src/codeatlas-cli.js",
     "preview": "node src/preview-cli.js",
     "serve": "node src/server.js",
+    "payload:sandbox-smoke": "node ci/payload-sandbox-smoke.mjs",
     "deploy:check": "node src/deploy-check.js",
     "test": "node --test",
     "check:codeatlas": "node --check src/codeatlas-cli.js",

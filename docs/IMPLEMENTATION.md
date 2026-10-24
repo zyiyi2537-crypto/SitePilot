@@ -80,6 +80,8 @@ Input: candidate ID, expected CMS snapshot, page operations, and idempotency key
 
 `PayloadHttpSandboxBackend` requires an HTTPS sandbox URL and a server-side bearer token. It writes only operation fields (not SitePilot-only fields that are absent from the upstream schema), sends locale as an API query parameter, then reads the draft back and compares every submitted field before returning a receipt. The Payload CI now drives this backend against the real ephemeral REST API, checks anonymous draft isolation, and opens the HTTP-created draft in authenticated desktop/mobile preview. The standard Payload REST API does not enforce SitePilot's idempotency or compare-and-swap headers; durable atomic idempotency still requires the planned server-side sandbox bridge before this backend is suitable for multi-worker or production use.
 
+For local development, `npm run payload:sandbox-smoke` reuses the same adapter against an explicitly supplied loopback Payload URL. It creates a uniquely named synthetic draft, verifies authenticated readback and anonymous isolation, and never enables loopback HTTP in the server's production configuration. The smoke command requires `PAYLOAD_LOCAL_EMAIL` and `PAYLOAD_LOCAL_PASSWORD` and rejects non-loopback URLs.
+
 ### SourcePackageInspector
 
 `src/source-inspector.js` implements the read-only `inspect_source_package` gate. It resolves only an opaque `source_*` snapshot ID under the configured quarantine root, checks LICENSE/NOTICE files, package manifests, lockfiles, scripts and binary assets, and returns a manifest hash plus a reuse mode. Missing licensing or unsafe scripts force `reference-only` until a reviewer resolves the risk.

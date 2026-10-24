@@ -7,7 +7,7 @@ const ALLOWED_LOCALES = new Set(["zh-CN", "en", "en-US", "ja", "de", "fr"]);
 
 function assertPublicHost(url) {
   const host = url.hostname.toLowerCase();
-  if (host === "localhost" || host === "metadata.google.internal" || host === "169.254.169.254" || host === "::1" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) throw new PolicyError("Payload sandbox host is private or reserved", "SSRF_BLOCKED");
+  if (host === "localhost" || host === "metadata.google.internal" || host === "169.254.169.254" || host === "::1" || host === "[::1]" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) throw new PolicyError("Payload sandbox host is private or reserved", "SSRF_BLOCKED");
 }
 
 function canonical(value) {
@@ -34,11 +34,14 @@ function payloadFieldsMatch(actual, expected) {
 }
 
 export class PayloadHttpSandboxBackend {
-  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
+  constructor({ baseUrl, token, fetchImpl = globalThis.fetch, allowLocalSandbox = false, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
     if (!baseUrl || !token || typeof fetchImpl !== "function") throw new PolicyError("Payload sandbox URL, token and fetch are required", "CONFIG_REQUIRED");
     const parsed = new URL(baseUrl);
-    if (parsed.protocol !== "https:") throw new PolicyError("Payload sandbox must use HTTPS", "POLICY_DENIED");
-    assertPublicHost(parsed);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new PolicyError("Payload sandbox URL cannot contain credentials, query or fragment", "POLICY_DENIED");
+    const localHost = parsed.hostname === "127.0.0.1" || parsed.hostname === "[::1]";
+    const localHttp = allowLocalSandbox === true && localHost && parsed.protocol === "http:" && parsed.pathname === "/";
+    if (parsed.protocol !== "https:" && !localHttp) throw new PolicyError("Payload sandbox must use HTTPS (or explicit loopback HTTP for local testing)", "POLICY_DENIED");
+    if (!localHttp) assertPublicHost(parsed);
     this.baseUrl = parsed.href.replace(/\/$/, "");
     this.token = token;
     this.fetch = fetchImpl;
