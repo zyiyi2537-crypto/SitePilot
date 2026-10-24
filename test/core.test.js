@@ -527,7 +527,7 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
       requests.push({ url, options });
       return options.method === "POST"
         ? { ok: true, json: async () => ({ doc: { id: "page_1" } }) }
-        : { ok: true, json: async () => ({ id: "page_1", slug: "home", title: "Home", _status: "draft" }) };
+        : { ok: true, json: async () => ({ id: "page_1", slug: "home", title: "Home", _status: "draft", layout: [{ id: "generated_block_1" }] }) };
     },
   });
   const designMappings = { schemaVersion: "payload-website-block-map-v1", designDraftId: "design_1", designHash: "a".repeat(64), pages: [] };
@@ -542,6 +542,14 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
   assert.equal(requests[0].options.headers["x-sitepilot-design-draft"], "design_1");
   assert.equal(requests[0].options.headers["x-sitepilot-design-hash"], "a".repeat(64));
   assert.equal(requests[0].options.headers["x-sitepilot-design-mapping-hash"], crypto.createHash("sha256").update(JSON.stringify(designMappings)).digest("hex"));
+  const nestedIds = new PayloadHttpSandboxBackend({
+    baseUrl: "https://payload-sandbox.example.test",
+    token: "sandbox-token",
+    fetchImpl: async (_url, options) => options.method === "POST"
+      ? { ok: true, json: async () => ({ doc: { id: "page_2" } }) }
+      : { ok: true, json: async () => ({ id: "page_2", slug: "home", title: "Home", _status: "draft", hero: { id: "hero_1", richText: { root: { id: "root_1" } } } }) },
+  });
+  await nestedIds.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_2", operations: [{ type: "upsert_page", collection: "pages", data: { slug: "home", title: "Home", hero: { richText: { root: {} } } } }] });
   const mismatchingReadback = new PayloadHttpSandboxBackend({
     baseUrl: "https://payload-sandbox.example.test",
     token: "sandbox-token",

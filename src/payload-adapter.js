@@ -16,8 +16,21 @@ function canonical(value) {
   return value;
 }
 
+function payloadValueMatches(actual, expected) {
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && actual.length === expected.length && expected.every((value, index) => payloadValueMatches(actual[index], value));
+  }
+  if (expected && typeof expected === "object") {
+    if (!actual || typeof actual !== "object" || Array.isArray(actual)) return false;
+    return Object.entries(expected).every(([key, value]) => payloadValueMatches(actual[key], value));
+  }
+  return JSON.stringify(canonical(actual)) === JSON.stringify(canonical(expected));
+}
+
 function payloadFieldsMatch(actual, expected) {
-  return Object.entries(expected).every(([key, value]) => JSON.stringify(canonical(actual?.[key])) === JSON.stringify(canonical(value)));
+  // Payload adds generated ids and bookkeeping fields to nested blocks. Every submitted
+  // field must survive unchanged, while those server-owned additions are ignored.
+  return payloadValueMatches(actual, expected);
 }
 
 export class PayloadHttpSandboxBackend {
