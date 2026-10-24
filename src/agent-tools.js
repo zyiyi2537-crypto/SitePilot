@@ -14,9 +14,11 @@ const descriptions = {
   submit_site_strategy: "Submit a validated SiteStrategy artifact for this run.",
   submit_component_plan: "Submit component recommendations that cite evidence retrieved during this task.",
   submit_content_model: "Submit proposed page content with valid project Claim references; missing facts must stop the workflow.",
+  submit_code_patch_plan: "Submit a candidate-bound, reviewable code change plan without writing files or running commands.",
   delegate_architect: "Ask the Architect child agent to create a strategy artifact.",
   delegate_research: "Ask the Research child agent to inspect the supplied repository and commit.",
   delegate_content_cms: "Ask the ContentCMS child agent to validate a bounded content model for the current design.",
+  delegate_coding: "Ask the Coding child agent to submit a candidate-bound, read-only code patch plan.",
   request_customer_input: "Pause the run and return up to three questions that need customer input.",
   complete_plan: "Finish the current planning stage after required artifacts are available.",
   inspect_payload_schema: "Read the allowlisted Payload schema without changing CMS data.",
@@ -32,6 +34,9 @@ const SAFE_TOOL_NAMES = new Set([
   "submit_site_strategy",
   "submit_component_plan",
   "submit_content_model",
+  "submit_code_patch_plan",
+  "inspect_source_package",
+  "delegate_coding",
   "delegate_architect",
   "delegate_research",
   "request_customer_input",
@@ -101,6 +106,7 @@ const schemas = {
     expectedCommit: Type.String({ minLength: 40, maxLength: 40 }),
   }),
   delegate_content_cms: Type.Object(decisionFields()),
+  delegate_coding: Type.Object(decisionFields()),
   request_customer_input: Type.Object({
     ...decisionFields(),
     questions: Type.Array(Type.Object({
@@ -113,6 +119,30 @@ const schemas = {
     ...decisionFields(),
     status: Type.Union([Type.Literal("proposed"), Type.Literal("needs_input")]),
     contentByPage: Type.Optional(Type.Unknown()),
+    questions: Type.Optional(Type.Array(Type.Object({
+      field: Type.String({ minLength: 1, maxLength: 64 }),
+      question: Type.String({ minLength: 1, maxLength: 240 }),
+      reason: Type.Optional(Type.String({ maxLength: 300 })),
+    }), { maxItems: 3 })),
+  }),
+  submit_code_patch_plan: Type.Object({
+    ...decisionFields(),
+    status: Type.Union([Type.Literal("proposed"), Type.Literal("needs_input")]),
+    candidateId: Type.String({ minLength: 1, maxLength: 200 }),
+    candidateHash: Type.String({ minLength: 64, maxLength: 64 }),
+    designDraftId: Type.String({ minLength: 1, maxLength: 200 }),
+    designHash: Type.String({ minLength: 64, maxLength: 64 }),
+    pagePlanHash: Type.String({ minLength: 1, maxLength: 200 }),
+    contentHash: Type.String({ minLength: 64, maxLength: 64 }),
+    expectedHead: Type.String({ minLength: 1, maxLength: 200 }),
+    files: Type.Optional(Type.Array(Type.Object({
+      path: Type.String({ minLength: 1, maxLength: 240 }),
+      operation: Type.Union([Type.Literal("modify"), Type.Literal("create"), Type.Literal("delete")]),
+      summary: Type.String({ minLength: 1, maxLength: 500 }),
+      sourceRefs: Type.Array(Type.String({ minLength: 1, maxLength: 200 }), { maxItems: 10 }),
+    }), { minItems: 1, maxItems: 20 })),
+    expectedTests: Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { minItems: 1, maxItems: 12 }),
+    risks: Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 8 }),
     questions: Type.Optional(Type.Array(Type.Object({
       field: Type.String({ minLength: 1, maxLength: 64 }),
       question: Type.String({ minLength: 1, maxLength: 240 }),
@@ -132,6 +162,7 @@ const schemas = {
   }),
   inspect_source_package: Type.Object({
     sourceId: Type.String({ minLength: 1, maxLength: 200 }),
+    paths: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { minItems: 1, maxItems: 5 })),
   }),
   apply_code_patch: Type.Object({
     files: Type.Array(Type.Unknown(), { maxItems: 20 }),

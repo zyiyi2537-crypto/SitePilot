@@ -1,5 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Readable } from "node:stream";
 import {
   createModels,
@@ -14,6 +18,7 @@ import { computePayloadRequestHash } from "../src/payload-adapter.js";
 
 const apiToken = "a".repeat(32);
 const reviewerToken = "b".repeat(32);
+const hash = (value) => crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -234,4 +239,160 @@ test("ContentCMS drafting stays below the Payload write grant", () => {
     runContext: { runId: "run_1", agentRunId: "run_1:research:1", inputSnapshotId: "snapshot:run_1", grant: { level: "L0" } },
     handler: async () => ({ accepted: true }),
   }), /cannot use submit_content_model/);
+  assert.throws(() => createPiTool({
+    role: "Coding",
+    name: "apply_code_patch",
+    runContext: { runId: "run_1", agentRunId: "run_1:coding:1", inputSnapshotId: "snapshot:run_1", grant: { level: "L0" } },
+    handler: async () => ({ accepted: true }),
+  }), /cannot use apply_code_patch/);
+});
+
+test("Coding proposes a read-only CodePatch bound to the approved candidate and design", async (t) => {
+  const worktreeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sitepilot-coding-api-"));
+  t.after(() => fs.rm(worktreeRoot, { recursive: true, force: true }));
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Build a reviewed product website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { strategy: "content-conversion", pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.research = { repository: "approved/repo", commit: "a".repeat(40), componentPlan: { decisions: [] }, evidence: [] };
+  run.pagePlan = {
+    sourceManifestHash: "page-plan-hash",
+    routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "approved/repo", commit: "a".repeat(40), path: "src/Hero.tsx" } }] }],
+  };
+  const design = store.createDesignDraft(run.id);
+  const workspace = path.join(worktreeRoot, run.id, design.id);
+  const sourcePath = "src/app/home.tsx";
+  const sourceContent = "export default function Page() { return <main>Existing page</main>; }\n";
+  await fs.mkdir(path.dirname(path.join(workspace, sourcePath)), { recursive: true });
+  await fs.writeFile(path.join(workspace, sourcePath), sourceContent);
+  const sourceManifest = [{ path: sourcePath, size: Buffer.byteLength(sourceContent), sha256: crypto.createHash("sha256").update(sourceContent).digest("hex") }];
+  const expectedHead = hash(sourceManifest);
+  const candidate = store.createCandidate(run.id, {
+    designDraftId: design.id,
+    build: { passed: true },
+    codeArtifact: { workspace, files: [sourcePath], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash },
+    sourceRefs: [{ evidenceId: "evidence_hero", repository: "approved/repo", commit: "a".repeat(40), path: "src/Hero.tsx" }],
+  });
+  const contentModel = {
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    designDraftId: design.id,
+    designHash: design.designHash,
+    pagePlanHash: run.pagePlan.sourceManifestHash,
+    contentByPage: { home: { title: "Home", heroTitle: "Approved product", claimRefs: ["claim_1"] } },
+    status: "proposed",
+  };
+  contentModel.contentHash = hash({
+    candidateId: contentModel.candidateId,
+    candidateHash: contentModel.candidateHash,
+    designDraftId: contentModel.designDraftId,
+    designHash: contentModel.designHash,
+    pagePlanHash: contentModel.pagePlanHash,
+    contentByPage: contentModel.contentByPage,
+  });
+  candidate.contentModel = contentModel;
+  run.contentModel = contentModel;
+
+  const faux = fauxProvider({ models: [{ id: "test-model" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_coding", { whyNow: "The customer approved page content", expectedObservation: "A bounded code plan", stopIf: ["The candidate source changed"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_source_package", { sourceId: `candidate:${candidate.id}`, paths: [sourcePath] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_code_patch_plan", {
+      whyNow: "Attempt an out-of-scope file change",
+      expectedObservation: "The server blocks path traversal",
+      stopIf: ["The path is not in the candidate manifest"],
+      risk: "high",
+      status: "proposed",
+      candidateId: candidate.id,
+      candidateHash: candidate.candidateHash,
+      designDraftId: design.id,
+      designHash: design.designHash,
+      pagePlanHash: run.pagePlan.sourceManifestHash,
+      contentHash: contentModel.contentHash,
+      expectedHead,
+      files: [{ path: "../../.env", operation: "modify", summary: "Attempt forbidden edit", sourceRefs: ["evidence_hero"] }],
+      expectedTests: ["npm test"],
+      risks: [],
+    }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_code_patch_plan", {
+      whyNow: "The current page needs component adaptation",
+      expectedObservation: "Reviewer can inspect the exact intended file changes",
+      stopIf: ["The candidate hash no longer matches"],
+      risk: "medium",
+      status: "proposed",
+      candidateId: candidate.id,
+      candidateHash: candidate.candidateHash,
+      designDraftId: design.id,
+      designHash: design.designHash,
+      pagePlanHash: run.pagePlan.sourceManifestHash,
+      contentHash: contentModel.contentHash,
+      expectedHead,
+      files: [{ path: sourcePath, operation: "modify", summary: "Adapt the hero layout to the approved direction", sourceRefs: ["evidence_hero"] }],
+      expectedTests: ["npm test"],
+      risks: ["Visual regression must be checked in preview"],
+    }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { whyNow: "The code plan is structured", expectedObservation: "The reviewer sees the proposed change", stopIf: ["Reviewer rejects the plan"], risk: "medium", summary: "CodePatch is ready for review" }), { stopReason: "toolUse" }),
+  ]);
+  const server = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer" },
+    undefined,
+    undefined,
+    null,
+    null,
+    null,
+    { worktreeRoot },
+    undefined,
+    null,
+    null,
+    (config) => ({ endpoint: config.baseUrl, modelVersion: config.model, apiMode: config.apiMode, testConnection: async () => ({}) }),
+    () => ({ model: faux.getModel(), streamFn: (model, context, options) => models.streamSimple(model, context, options) }),
+  );
+  assert.equal((await request(server, "POST", "/model/config", apiToken, { baseUrl: "https://model.example/v1", model: "test-model", apiMode: "chat_completions", apiKey: "test-secret" })).status, 200);
+  assert.equal((await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "coding", candidateId: candidate.id })).body.code, "CONTENT_APPROVAL_REQUIRED");
+
+  candidate.contentApproval = {
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    designDraftId: design.id,
+    designHash: design.designHash,
+    contentHash: contentModel.contentHash,
+    approvedBy: "reviewer",
+    approvedAt: new Date().toISOString(),
+  };
+  const result = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "coding", candidateId: candidate.id });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.status, "code_review_required");
+  assert.equal(result.body.codePatch.status, "proposed");
+  assert.equal(result.body.codePatch.candidateHash, candidate.candidateHash);
+  assert.equal(result.body.codePatch.designHash, design.designHash);
+  assert.equal(result.body.codePatch.expectedHead, expectedHead);
+  assert.equal(result.body.codePatch.files[0].path, sourcePath);
+  assert.equal(result.body.codePatch.codePatchHash.length, 64);
+  assert.equal(store.audit.some((event) => event.type === "agent.code_patch.rejected" && event.data?.code === "POLICY_DENIED"), true);
+  assert.equal(result.body.artifacts.filter((artifact) => artifact.type === "CodePatch" && artifact.status === "proposed").length, 1);
+  assert.equal(await fs.readFile(path.join(workspace, sourcePath), "utf8"), sourceContent);
+  assert.equal(store.audit.some((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "Coding"), true);
+
+  const patchHash = result.body.codePatch.codePatchHash;
+  const unauthorizedApproval = await request(server, "POST", `/candidates/${candidate.id}/code-patch-approval`, apiToken, { approved: true, expectedCodePatchHash: patchHash });
+  assert.equal(unauthorizedApproval.status, 401);
+  const wrongHashApproval = await request(server, "POST", `/candidates/${candidate.id}/code-patch-approval`, reviewerToken, { approved: true, expectedCodePatchHash: "f".repeat(64) });
+  assert.equal(wrongHashApproval.status, 409);
+  assert.equal(wrongHashApproval.body.code, "CODE_PATCH_CHANGED");
+  const rejectedApproval = await request(server, "POST", `/candidates/${candidate.id}/code-patch-approval`, reviewerToken, { expectedCodePatchHash: patchHash });
+  assert.equal(rejectedApproval.status, 422);
+  assert.equal(rejectedApproval.body.code, "CODE_PATCH_REVIEW_NOT_APPROVED");
+  const approval = await request(server, "POST", `/candidates/${candidate.id}/code-patch-approval`, reviewerToken, { approved: true, expectedCodePatchHash: patchHash });
+  assert.equal(approval.status, 201);
+  assert.equal(approval.body.status, "approved_for_execution_review");
+  assert.equal(approval.body.codePatchHash, patchHash);
+  assert.equal(approval.body.executionGranted, false);
+  assert.equal(run.codePatchApproval.executionGranted, false);
+  const repeatedApproval = await request(server, "POST", `/candidates/${candidate.id}/code-patch-approval`, reviewerToken, { approved: true, expectedCodePatchHash: patchHash });
+  assert.equal(repeatedApproval.status, 200);
+  assert.equal(repeatedApproval.body.codePatchHash, patchHash);
+  assert.equal(store.audit.filter((event) => event.type === "code-patch.approved").length, 1);
 });

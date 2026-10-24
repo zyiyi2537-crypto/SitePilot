@@ -73,6 +73,11 @@ function contentModelHash(model = {}) {
   })).digest("hex");
 }
 
+function codePatchHash(patch = {}) {
+  const { codePatchHash: omitted, ...canonical } = patch;
+  return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter, agentModelRuntimeFactory = createPiModelRuntime, agentToolJournal = null) {
   intake = intake || createIntakeAdapterFromEnvironment();
   const environmentIntake = intake;
@@ -109,6 +114,68 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
   const generationWorkspace = (run, designId) => path.resolve(generation.worktreeRoot, run.id, run.candidateIds?.length ? designId : "");
+  const inspectCandidateSource = async (run, candidate) => {
+    if (!generation?.worktreeRoot || !path.isAbsolute(generation.worktreeRoot)) throw new PolicyError("Candidate source inspection is not configured", "GENERATION_NOT_CONFIGURED");
+    const declaredFiles = candidate.codeArtifact?.files;
+    if (!Array.isArray(declaredFiles) || declaredFiles.length < 1 || declaredFiles.length > 200) throw new PolicyError("Candidate source manifest is invalid", "SOURCE_PACKAGE_REQUIRED");
+    const workspace = generationWorkspace(run, candidate.designDraftId);
+    if (path.resolve(candidate.codeArtifact?.workspace || "") !== workspace) throw new PolicyError("Candidate source workspace is not the server-owned design workspace", "POLICY_DENIED");
+    const root = await fs.realpath(workspace);
+    const configuredRoot = await fs.realpath(generation.worktreeRoot);
+    if (!root.startsWith(`${configuredRoot}${path.sep}`)) throw new PolicyError("Candidate source resolves outside the configured worktree root", "POLICY_DENIED");
+    const normalizedFiles = [...new Set(declaredFiles)].map((file) => {
+      if (typeof file !== "string" || !file.trim() || path.isAbsolute(file) || file.split(/[\\/]/).includes("..") || /(^|[\\/])(?:\.env(?:\.|$)|\.git(?:[\\/]|$)|node_modules(?:[\\/]|$)|secrets?(?:[\\/]|$))/i.test(file)) throw new PolicyError("Candidate source manifest contains an unsafe path", "POLICY_DENIED");
+      return file.replaceAll("\\", "/");
+    }).sort();
+    if (normalizedFiles.length !== declaredFiles.length) throw new PolicyError("Candidate source manifest contains duplicate paths", "SCHEMA_REJECTED");
+    const manifest = [];
+    let totalBytes = 0;
+    for (const file of normalizedFiles) {
+      const target = path.resolve(root, file);
+      if (!target.startsWith(`${root}${path.sep}`)) throw new PolicyError("Candidate source path escapes its worktree", "POLICY_DENIED");
+      const actual = await fs.realpath(target);
+      if (!actual.startsWith(`${root}${path.sep}`)) throw new PolicyError("Candidate source path resolves outside its worktree", "POLICY_DENIED");
+      const stat = await fs.stat(actual);
+      if (!stat.isFile() || stat.size > 2 * 1024 * 1024) throw new PolicyError(`Candidate source file is not a bounded regular file: ${file}`, "SOURCE_INVALID");
+      totalBytes += stat.size;
+      if (totalBytes > 25 * 1024 * 1024) throw new PolicyError("Candidate source package exceeds the inspection limit", "SOURCE_TOO_LARGE");
+      const content = await fs.readFile(actual);
+      if (content.includes(0)) throw new PolicyError(`Candidate source contains a binary file: ${file}`, "SOURCE_INVALID");
+      manifest.push({ path: file, size: content.length, sha256: crypto.createHash("sha256").update(content).digest("hex") });
+    }
+    const expectedHead = crypto.createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+    return {
+      sourceFiles: manifest.map((item) => item.path),
+      sourceManifest: manifest,
+      expectedHead,
+      async assertCurrent() {
+        const current = await inspectCandidateSource(run, candidate);
+        if (current.expectedHead !== expectedHead) throw new PolicyError("Candidate source changed during Coding review", "STALE_REVISION");
+        return expectedHead;
+      },
+      async readFiles(paths = []) {
+        const current = await inspectCandidateSource(run, candidate);
+        if (current.expectedHead !== expectedHead) throw new PolicyError("Candidate source changed during Coding inspection", "STALE_REVISION");
+        if (!Array.isArray(paths) || paths.length < 1 || paths.length > 5 || paths.some((file) => !current.sourceFiles.includes(file))) throw new PolicyError("Coding requested files outside the current candidate source manifest", "POLICY_DENIED");
+        let returnedBytes = 0;
+        const files = [];
+        for (const file of [...new Set(paths)]) {
+          const target = path.resolve(root, file);
+          const actual = await fs.realpath(target);
+          if (!actual.startsWith(`${root}${path.sep}`)) throw new PolicyError("Candidate source path resolves outside its worktree", "POLICY_DENIED");
+          const bytes = await fs.readFile(actual);
+          returnedBytes += bytes.length;
+          if (bytes.length > 64 * 1024 || returnedBytes > 128 * 1024) throw new PolicyError("Coding source read exceeds the text inspection limit", "SOURCE_TOO_LARGE");
+          const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+          if (current.sourceManifest.find((item) => item.path === file)?.sha256 !== sha256) throw new PolicyError("Candidate source changed while it was being read", "STALE_REVISION");
+          const content = bytes.toString("utf8");
+          if (content.includes("\uFFFD") || /-----BEGIN (?:RSA|OPENSSH|EC|DSA) PRIVATE KEY-----|AKIA[0-9A-Z]{16}|(?:api[_-]?key|secret|token|password)\s*[:=]\s*["'][^"']{12,}/i.test(content)) throw new PolicyError(`Candidate source may contain binary data or a secret: ${file}`, "SOURCE_SENSITIVE");
+          files.push({ path: file, sha256, content });
+        }
+        return files;
+      },
+    };
+  };
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
@@ -124,6 +191,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const authorization = req.headers.authorization || "";
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
       const contentApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/content-approval$/);
+      const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
@@ -135,7 +203,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
+      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -276,7 +344,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (hasRepository && (!codeAtlas || typeof codeAtlas.search !== "function")) return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
         if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
         let contentCms = null;
-        if (input.phase !== undefined && input.phase !== "content") return send(res, 422, { code: "INVALID_AGENT_PHASE" });
+        if (input.phase !== undefined && !["content", "coding"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
         if (input.phase === "content") {
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
@@ -312,11 +380,51 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             contentOnly: true,
           };
         }
+        let coding = null;
+        if (input.phase === "coding") {
+          if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
+          const candidate = store.candidates.get(input.candidateId);
+          if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+          if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (run.codingPatch?.candidateHash === candidate.candidateHash && run.codingPatch?.designHash === candidate.revision?.designHash) return send(res, 409, { code: "CODE_PATCH_ALREADY_PROPOSED" });
+          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+          if (!run.strategy || !run.research) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
+          if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+          const designDraft = store.designs.get(candidate.designDraftId);
+          if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+          const contentModel = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
+          const expectedContentHash = contentModel ? contentModelHash(contentModel) : null;
+          if (!contentModel || contentModel.status !== "proposed" || !contentModel.contentHash || contentModel.contentHash !== expectedContentHash) return send(res, 422, { code: "CONTENT_MODEL_REQUIRED" });
+          const approval = candidate.contentApproval;
+          if (!approval || approval.candidateId !== candidate.id || approval.candidateHash !== candidate.candidateHash || approval.designDraftId !== designDraft.id || approval.designHash !== designDraft.designHash || approval.contentHash !== expectedContentHash) return send(res, 422, { code: "CONTENT_APPROVAL_REQUIRED" });
+          if (!Array.isArray(candidate.codeArtifact?.files) || !candidate.codeArtifact.files.length) return send(res, 422, { code: "SOURCE_PACKAGE_REQUIRED" });
+          const source = await inspectCandidateSource(run, candidate);
+          coding = {
+            codingOnly: true,
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            candidate,
+            designDraft,
+            designDraftId: designDraft.id,
+            designHash: designDraft.designHash,
+            contentModel,
+            pagePlanHash: run.pagePlan.sourceManifestHash || null,
+            expectedHead: source.expectedHead,
+            sourceId: `candidate:${candidate.id}`,
+            sourceFiles: source.sourceFiles,
+            sourceManifest: source.sourceManifest,
+            assertCurrent: source.assertCurrent,
+            readFiles: source.readFiles,
+            sourceRefs: Array.isArray(candidate.sourceRefs) ? candidate.sourceRefs.map((item) => typeof item === "string" ? item : ({ evidenceId: item?.evidenceId || item?.id || null, repository: item?.repository || null, commit: item?.commit || null, path: item?.path || null, licenseReference: item?.licenseReference || null })).filter((item) => typeof item === "string" || item.evidenceId) : [],
+            fileCount: source.sourceFiles.length,
+          };
+        }
         runningAgentRuns.add(run.id);
         try {
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
-          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms });
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding });
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
           const returnedContentModel = result.contentModel || (contentCms?.candidate ? run.contentModel : null);
           if (returnedContentModel) {
@@ -718,6 +826,45 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.event(candidate.runId, "content-model.approved", { candidateId: candidate.id, contentHash: expectedHash, approvedBy: reviewerId });
         store.persist?.();
         return send(res, 201, { candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: design.id, designHash: design.designHash, contentHash: expectedHash, approvedBy: reviewerId, status: "approved" });
+      }
+      if (req.method === "POST" && codePatchApprovalMatch) {
+        const candidate = store.candidates.get(codePatchApprovalMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        const patch = run.codingPatch;
+        const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        const contentModel = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
+        const input = await readJson(req);
+        if (input.approved !== true) return send(res, 422, { code: "CODE_PATCH_REVIEW_NOT_APPROVED" });
+        if (!patch || patch.status !== "proposed") return send(res, 422, { code: "CODE_PATCH_REQUIRED" });
+        if (patch.candidateId !== candidate.id || patch.candidateHash !== candidate.candidateHash || patch.designDraftId !== design?.id || patch.designHash !== design?.designHash || patch.pagePlanHash !== run.pagePlan?.sourceManifestHash || patch.contentHash !== contentModel?.contentHash) return send(res, 409, { code: "STALE_REVISION" });
+        const expectedPatchHash = codePatchHash(patch);
+        if (patch.codePatchHash !== expectedPatchHash || input.expectedCodePatchHash !== expectedPatchHash) return send(res, 409, { code: "CODE_PATCH_CHANGED" });
+        const source = await inspectCandidateSource(run, candidate);
+        if (source.expectedHead !== patch.expectedHead) return send(res, 409, { code: "STALE_SOURCE_REVISION" });
+        const contentApproval = candidate.contentApproval;
+        if (!contentApproval || contentApproval.candidateId !== candidate.id || contentApproval.candidateHash !== candidate.candidateHash || contentApproval.designDraftId !== design?.id || contentApproval.designHash !== design?.designHash || contentApproval.contentHash !== patch.contentHash) return send(res, 422, { code: "CONTENT_APPROVAL_REQUIRED" });
+        if (run.codePatchApproval?.codePatchHash === expectedPatchHash) {
+          return send(res, 200, { ...run.codePatchApproval, status: "approved_for_execution_review" });
+        }
+        const approval = Object.freeze({
+          candidateId: candidate.id,
+          candidateHash: candidate.candidateHash,
+          designDraftId: design.id,
+          designHash: design.designHash,
+          pagePlanHash: patch.pagePlanHash,
+          contentHash: patch.contentHash,
+          expectedHead: patch.expectedHead,
+          codePatchHash: expectedPatchHash,
+          approvedBy: reviewerId,
+          approvedAt: new Date().toISOString(),
+          executionGranted: false,
+        });
+        run.codePatchApproval = approval;
+        store.event(run.id, "code-patch.approved", { candidateId: candidate.id, candidateHash: candidate.candidateHash, designHash: design.designHash, codePatchHash: expectedPatchHash, approvedBy: reviewerId, executionGranted: false });
+        store.persist?.();
+        return send(res, 201, { ...approval, status: "approved_for_execution_review" });
       }
       const qaMatch = url.pathname.match(/^\/candidates\/([^/]+)\/qa$/);
       if (req.method === "POST" && qaMatch) {

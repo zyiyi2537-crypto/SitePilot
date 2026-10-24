@@ -192,11 +192,30 @@ function renderDelivery(result) {
   const contentApprovalRequired = currentRun?.contentModel?.status === "proposed" && currentRun.contentModel.candidateId === currentCandidate?.id;
   const contentApproved = currentCandidate?.contentApproval?.contentHash === currentRun?.contentModel?.contentHash;
   $("#approve-content").disabled = !contentApprovalRequired || contentApproved || !currentCandidate?.build?.passed;
+  const codePatch = currentRun?.codingPatch?.candidateHash === currentCandidate?.candidateHash ? currentRun.codingPatch : null;
+  const codePatchApproved = Boolean(codePatch && currentRun?.codePatchApproval?.codePatchHash === codePatch.codePatchHash);
+  $("#generate-code-plan").disabled = !isCurrentCandidate || !currentCandidate?.build?.passed || !contentApproved || Boolean(codePatch);
+  $("#approve-code-plan").disabled = !codePatch || codePatch.status !== "proposed" || codePatchApproved;
+  const codeReview = $("#code-patch-review");
+  codeReview.hidden = !codePatch;
+  if (codePatch) codeReview.textContent = JSON.stringify({
+    status: codePatchApproved ? "已审核，未授予执行权" : "待审核",
+    codePatchHash: codePatch.codePatchHash,
+    whyNow: codePatch.whyNow,
+    expectedObservation: codePatch.expectedObservation,
+    files: codePatch.files,
+    expectedTests: codePatch.expectedTests,
+    risks: codePatch.risks,
+    executionGranted: currentRun?.codePatchApproval?.executionGranted === true,
+  }, null, 2);
   $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot) || !$("#content-reviewed").checked || (contentApprovalRequired && !contentApproved);
   $("#start-preview").disabled = !currentCandidate?.build?.passed;
   $("#run-qa").disabled = !currentCandidate || !currentPreview;
   if (!currentCandidate) status.textContent = hasPlan ? "设计已就绪，可以生成代码候选。" : "需要先生成页面计划和设计草稿。";
-  else status.textContent = `候选 ${currentCandidate.id} · ${currentCandidate.cmsSnapshot ? "含 Payload 草稿" : "代码候选"} · QA ${currentCandidate.quality?.passed ? "通过" : "待运行"}`;
+  else {
+    const codeStatus = codePatchApproved ? "代码方案已审核（未授予执行权）" : codePatch ? "代码方案待审核" : null;
+    status.textContent = `候选 ${currentCandidate.id} · ${currentCandidate.cmsSnapshot ? "含 Payload 草稿" : "代码候选"} · QA ${currentCandidate.quality?.passed ? "通过" : "待运行"}${codeStatus ? ` · ${codeStatus}` : ""}`;
+  }
 }
 
 function renderDesignDraft() {
@@ -461,6 +480,21 @@ $("#approve-content").onclick = () => action(async () => {
   const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/content-approval`, { approved: true, expectedContentHash: currentRun.contentModel.contentHash }, "reviewer");
   await showRun();
   return `内容已由 ${result.approvedBy} 审核并绑定到当前候选`;
+});
+$("#generate-code-plan").onclick = () => action(async () => {
+  if (!currentCandidate || !currentCandidate.contentApproval) throw new Error("请先审核并授权内容");
+  const result = await api("POST", `/runs/${encodeURIComponent(runId)}/agent`, { phase: "coding", candidateId: currentCandidate.id });
+  await showRun();
+  renderDelivery(result);
+  return result.status === "needs_input" ? "代码 Agent 发现缺少实现资料，已返回待补问题" : "代码方案已生成，等待审核；当前不会修改 worktree";
+});
+$("#approve-code-plan").onclick = () => action(async () => {
+  const patch = currentRun?.codingPatch;
+  if (!currentCandidate || !patch || patch.candidateHash !== currentCandidate.candidateHash) throw new Error("请先生成当前候选的代码方案");
+  $("#review-token-field").style.display = "grid";
+  const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/code-patch-approval`, { approved: true, expectedCodePatchHash: patch.codePatchHash }, "reviewer");
+  await showRun();
+  return `代码方案已由 ${result.approvedBy} 审核；当前未授予执行权限`;
 });
 $("#content-reviewed").onchange = () => renderDelivery();
 $("#payload-content").oninput = () => { $("#content-reviewed").checked = false; renderDelivery(); };
