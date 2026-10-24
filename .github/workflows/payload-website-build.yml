@@ -191,5 +191,6 @@ jobs:
             payload-source/templates/website/sitepilot-cms-receipt.json
             payload-source/templates/website/sitepilot-preview-report.json
             payload-source/templates/website/sitepilot-typecheck-report.json
+            payload-source/templates/website/sitepilot-server.log
             payload-source/templates/website/sitepilot-desktop.png
             payload-source/templates/website/sitepilot-mobile.png
