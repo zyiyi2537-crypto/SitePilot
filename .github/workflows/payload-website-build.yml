@@ -148,6 +148,10 @@ jobs:
       - name: Install Chromium for real preview acceptance
         working-directory: payload-source/templates/website
         run: corepack pnpm exec playwright install --with-deps chromium
+      - name: Generate production routes for preview acceptance
+        working-directory: payload-source/templates/website
+        timeout-minutes: 8
+        run: node sitepilot-command.mjs corepack pnpm exec next build --webpack --experimental-build-mode generate
       - name: Start website and verify authenticated draft preview
         working-directory: payload-source/templates/website
         timeout-minutes: 8
@@ -171,16 +175,21 @@ jobs:
             tail -n 80 sitepilot-server.log
             exit 1
           fi
+          set +e
           node sitepilot-command.mjs corepack pnpm exec tsx sitepilot-preview.ts
+          result=$?
+          if [ "$result" -ne 0 ]; then
+            echo "--- Payload website server log ---"
+            tail -n 160 sitepilot-server.log || true
+            echo "--- Payload website health response ---"
+            curl --silent --show-error --include http://127.0.0.1:3000/api/users/me || true
+          fi
+          exit "$result"
       - name: Probe full website TypeScript validation
         continue-on-error: true
         working-directory: payload-source/templates/website
         timeout-minutes: 8
         run: node sitepilot-command.mjs corepack pnpm exec node sitepilot-typecheck.mjs
-      - name: Generate production routes
-        working-directory: payload-source/templates/website
-        timeout-minutes: 8
-        run: node sitepilot-command.mjs corepack pnpm exec next build --webpack --experimental-build-mode generate
       - name: Upload synthetic draft acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
