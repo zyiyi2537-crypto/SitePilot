@@ -3,12 +3,52 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { PolicyError } from "./core.js";
+import { renderDesignPreviewDocument, renderDesignPreviewStylesheet } from "./design-preview.js";
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character]));
 }
 
+function renderBoundDesign(route, design) {
+  if (!design?.pageTree?.length) return null;
+  const page = design.pageTree.find((item) => item.page === route.page && item.route === route.route);
+  if (!page || !Array.isArray(route.components) || !Array.isArray(page.components) || page.components.length !== route.components.length) return null;
+  const planned = new Map(route.components.map((component) => [component.registryId, component]));
+  if (page.components.some((component) => {
+    const source = planned.get(component.registryId);
+    return !source || (component.name && source.name !== component.name);
+  })) return null;
+  const boundDesign = {
+    ...design,
+    pageTree: design.pageTree.map((item) => item.page === route.page && item.route === route.route
+      ? {
+          ...item,
+          components: item.components.map((component) => ({
+            ...component,
+            name: planned.get(component.registryId).name,
+          })),
+        }
+      : item),
+  };
+  const document = renderDesignPreviewDocument({
+    designDraft: boundDesign,
+    page: route.page,
+    locale: design.previewContext?.locale || "zh-CN",
+    industry: design.previewContext?.industry,
+    audience: design.previewContext?.audience,
+    primaryConversion: design.previewContext?.primaryConversion,
+    businessGoal: design.previewContext?.businessGoal,
+  });
+  if (!document) return "";
+  const stylesheet = renderDesignPreviewStylesheet({ designDraft: design });
+  const styleHref = `data:text/css;charset=utf-8,${encodeURIComponent(stylesheet)}`;
+  return document
+    .replace("__SITEPILOT_PREVIEW_STYLESHEET__", styleHref)
+    .replace("<body>", `<body data-sitepilot-design-hash="${escapeHtml(design.designHash)}" data-sitepilot-design-id="${escapeHtml(design.id)}">`);
+}
+
 function renderPage(route, design = null) {
+  if (design) return renderBoundDesign(route, design);
   const designPage = design?.pageTree?.find((page) => page.page === route.page && page.route === route.route);
   const componentById = new Map((designPage?.components || []).map((component) => [component.registryId, component]));
   const components = route.components.map((component) => {
@@ -48,8 +88,13 @@ export class LocalPreviewServer {
         response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
         return response.end("Preview route not found");
       }
-      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" });
-      response.end(renderPage(route, this.plan.design));
+      const html = renderPage(route, this.plan.design);
+      if (!html) {
+        response.writeHead(409, { "content-type": "text/plain; charset=utf-8" });
+        return response.end("Candidate route does not match its bound design revision");
+      }
+      response.writeHead(200, { "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src data: 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'; frame-ancestors 'none'" });
+      response.end(html);
     });
     await new Promise((resolve, reject) => {
       this.server.once("error", reject);

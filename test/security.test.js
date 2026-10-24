@@ -536,7 +536,7 @@ test("local preview exposes the bound design revision and component props", asyn
     design: {
       id: "design_preview_1",
       designHash: "hash_preview_1",
-      pageTree: [{ page: "home", route: "/", components: [{ instanceId: "home:block_hero:0", registryId: "block_hero", props: { density: "compact" } }] }],
+      pageTree: [{ page: "home", route: "/", components: [{ instanceId: "home:block_hero:0", registryId: "block_hero", props: { title: "A precise homepage", description: "A reviewed value proposition" } }] }],
     },
     routes: [{ route: "/", page: "home", components: [{ name: "Hero", registryId: "block_hero", source: { repository: "payload", commit: "a".repeat(40), path: "src/Hero.tsx" } }] }],
   } });
@@ -546,9 +546,28 @@ test("local preview exposes the bound design revision and component props", asyn
     const html = await response.text();
     assert.equal(response.status, 200);
     assert.match(html, /data-sitepilot-design-hash="hash_preview_1"/);
-    assert.match(html, /design_preview_1/);
-    assert.match(html, /&quot;density&quot;: &quot;compact&quot;/);
-    assert.match(html, /data-design-instance="home:block_hero:0"/);
+    assert.match(html, /data-sitepilot-design-id="design_preview_1"/);
+    assert.match(html, /<h1>A precise homepage<\/h1>/);
+    assert.match(html, /A reviewed value proposition/);
+    assert.match(html, /data:text\/css;charset=utf-8/);
+    assert.match(response.headers.get("content-security-policy"), /style-src data:/);
+    assert.doesNotMatch(html, /Design properties|density/);
+    assert.match(html, /data-instance="home:block_hero:0"/);
+  } finally {
+    await preview.close();
+  }
+});
+
+test("local candidate preview refuses routes detached from their design revision", async () => {
+  const preview = new LocalPreviewServer({ plan: {
+    design: { id: "design_wrong_route", designHash: "hash_wrong_route", pageTree: [{ page: "about", route: "/about", components: [{ registryId: "block_hero", name: "Hero", props: {} }] }] },
+    routes: [{ route: "/", page: "home", components: [{ registryId: "block_hero", name: "Hero" }] }],
+  } });
+  const address = await preview.listen();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/`);
+    assert.equal(response.status, 409);
+    assert.match(await response.text(), /does not match its bound design revision/);
   } finally {
     await preview.close();
   }
