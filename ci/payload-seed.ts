@@ -12,6 +12,16 @@ assert.equal(plan.synthetic, true)
 assert.equal(plan.publishAllowed, false)
 assert.equal(plan.projectId, 'ci-synthetic-website')
 assert.equal(plan.operations.length, 1)
+assert.equal(plan.designMappings?.schemaVersion, 'payload-website-block-map-v1')
+assert.equal(plan.designMappings?.designDraftId, 'design_ci_synthetic')
+assert.match(plan.designMappings?.designHash ?? '', /^[a-f0-9]{64}$/)
+const designPage = plan.designMappings.pages.find((item: { page: string }) => item.page === 'sitepilot-ci')
+assert.ok(designPage)
+assert.deepEqual(designPage.components.map((component: { name: string; payloadTarget: string; blockType: string | null }) => [component.name, component.payloadTarget, component.blockType]), [
+  ['Hero', 'hero', null],
+  ['Content', 'layout[0]', 'content'],
+  ['CTA', 'layout[1]', 'cta'],
+])
 const operation = plan.operations[0]
 assert.equal(operation.type, 'upsert_page')
 assert.equal(operation.collection, 'pages')
@@ -38,6 +48,7 @@ try {
   assert.equal(draft.title, operation.data.title)
   assert.deepEqual(draft.hero?.richText, operation.data.hero.richText)
   assert.equal(draft.layout?.length, operation.data.layout.length)
+  assert.deepEqual(draft.layout?.map((block: { blockType: string }) => block.blockType), designPage.components.slice(1).map((component: { blockType: string | null }) => component.blockType))
   const visible = await payload.find({
     collection: 'pages', overrideAccess: false, draft: false,
     where: { slug: { equals: operation.data.slug } },
@@ -46,7 +57,9 @@ try {
   await fs.writeFile('./sitepilot-cms-receipt.json', JSON.stringify({
     synthetic: true, sourceCommit: plan.sourceCommit, projectId: plan.projectId,
     recordId: page.id, slug: draft.slug, status: draft._status,
-    claimRefs: plan.claimRefs, published: false, database: 'ephemeral-ci-only',
+    claimRefs: plan.claimRefs, designDraftId: plan.designMappings.designDraftId,
+    designHash: plan.designMappings.designHash, designMappings: plan.designMappings,
+    published: false, database: 'ephemeral-ci-only',
   }, null, 2))
   console.log('Verified CMS draft persisted and excluded from public reads.')
 } finally {
