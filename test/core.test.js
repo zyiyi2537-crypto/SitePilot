@@ -372,13 +372,17 @@ test("Payload sandbox drafts are bounded and idempotent", async () => {
   const adapter = new PayloadSandboxAdapter({
     backend: { apply: async (input) => { calls += 1; intent = input; return { snapshotId: "cms_snapshot_1", recordRefs: ["page_home"], diff: ["pages/home"] }; } },
   });
-  const input = { candidateId: "candidate_1", expectedCmsSnapshot: "cms_snapshot_0", idempotencyKey: "idem_1", designDraftId: "design_1", designHash: "a".repeat(64), pageOperations: [{ type: "upsert_page", collection: "pages", locale: "zh-CN", data: { slug: "home", title: "首页" } }] };
+  const designMappings = { schemaVersion: "payload-website-block-map-v1", designDraftId: "design_1", designHash: "a".repeat(64), pages: [{ page: "home", route: "/", claimRefs: [], components: [{ instanceId: "hero_1", registryId: "hero", name: "Hero", propsHash: "c".repeat(64), payloadTarget: "hero", blockType: null, copyPolicy: "approved_content_required" }] }] };
+  const input = { candidateId: "candidate_1", expectedCmsSnapshot: "cms_snapshot_0", idempotencyKey: "idem_1", designDraftId: "design_1", designHash: "a".repeat(64), designMappings, pageOperations: [{ type: "upsert_page", collection: "pages", locale: "zh-CN", data: { slug: "home", title: "首页" } }] };
   const first = await adapter.createDraft(input);
   const second = await adapter.createDraft(input);
   assert.deepEqual(first, second);
   assert.equal(calls, 1);
   assert.equal(intent.designDraftId, "design_1");
+  assert.deepEqual(intent.designMappings, designMappings);
   assert.equal(first.designHash, "a".repeat(64));
+  assert.deepEqual(first.designMappings, designMappings);
+  await assert.rejects(() => adapter.createDraft({ ...input, designMappings: { ...designMappings, pages: [{ ...designMappings.pages[0], components: [{ ...designMappings.pages[0].components[0], propsHash: "d".repeat(64) }] }] } }), /Idempotency key was reused/);
   assert.equal(first.createsDraftVersion, false);
   await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_2", environment: "production" }), /sandbox environment/);
   await assert.rejects(() => adapter.createDraft({ ...input, idempotencyKey: "idem_3", designHash: undefined }), /provided together/);
@@ -521,12 +525,14 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
     token: "sandbox-token",
     fetchImpl: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ doc: { id: "page_1" } }) }; },
   });
-  const result = await backend.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", designDraftId: "design_1", designHash: "a".repeat(64), operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] });
+  const designMappings = { schemaVersion: "payload-website-block-map-v1", designDraftId: "design_1", designHash: "a".repeat(64), pages: [] };
+  const result = await backend.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", designDraftId: "design_1", designHash: "a".repeat(64), designMappings, operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] });
   assert.equal(result.recordRefs[0].id, "page_1");
   assert.equal(requests[0].options.method, "POST");
   assert.match(requests[0].options.body, /"_status":"draft"/);
   assert.equal(requests[0].options.headers["x-sitepilot-design-draft"], "design_1");
   assert.equal(requests[0].options.headers["x-sitepilot-design-hash"], "a".repeat(64));
+  assert.equal(requests[0].options.headers["x-sitepilot-design-mapping-hash"], crypto.createHash("sha256").update(JSON.stringify(designMappings)).digest("hex"));
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://insecure.test", token: "x" }), /HTTPS/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://127.0.0.1", token: "x" }), /private or reserved/);
 });
@@ -847,4 +853,35 @@ test("Payload draft plan emits real Website Template pages and blocks unsupporte
   assert.equal(plan.operations[0].data.layout[0].blockType, "content");
   assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["ProductGrid"], locales: ["en"] }, contentByPage: { home: content.home } }), /schema/);
   assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN", "en"] }, contentByPage: { home: content.home } }), /localization/);
+});
+
+test("Payload draft plan maps ordered DesignDraft components to audited template fields", () => {
+  const source = (name) => ({ repository: "payload", commit: "a".repeat(40), path: `${name}.tsx` });
+  const plannedComponents = ["Hero", "Content", "CTA"].map((name) => ({ name, registryId: name.toLowerCase(), source: source(name) }));
+  const designDraft = {
+    id: "design_1",
+    designHash: "b".repeat(64),
+    pageTree: [{ page: "home", route: "/", components: [
+      { ...plannedComponents[0], instanceId: "hero_1", props: { density: "compact" } },
+      { ...plannedComponents[2], instanceId: "cta_1", props: { title: "Next step" } },
+      { ...plannedComponents[1], instanceId: "content_1", props: { title: "Details" } },
+    ] }],
+  };
+  const plan = createPayloadDraftPlan({
+    projectId: "project_1",
+    strategy: { pageHierarchy: ["home"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] },
+    pagePlan: { routes: [{ page: "home", route: "/", components: plannedComponents }] },
+    designDraft,
+    contentByPage: { home: { title: "Home", heroTitle: "Approved heading", description: "Approved copy", cta: "Contact us", claimRefs: ["claim_home"] } },
+  });
+  assert.deepEqual(plan.operations[0].data.layout.map((block) => block.blockType), ["cta", "content"]);
+  assert.deepEqual(plan.designMappings.pages[0].components.map(({ instanceId, payloadTarget }) => [instanceId, payloadTarget]), [["hero_1", "hero"], ["cta_1", "layout[0]"], ["content_1", "layout[1]"]]);
+  assert.match(plan.designMappings.pages[0].components[0].propsHash, /^[a-f0-9]{64}$/);
+  assert.deepEqual(plan.designMappings.pages[0].claimRefs, ["claim_home"]);
+  assert.throws(() => createPayloadDraftPlan({
+    strategy: { pageHierarchy: ["home"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] },
+    pagePlan: { routes: [{ page: "home", route: "/", components: plannedComponents }] },
+    designDraft: { ...designDraft, pageTree: [{ ...designDraft.pageTree[0], components: designDraft.pageTree[0].components.map((component, index) => index === 1 ? { ...component, source: source("forged") } : component) }] },
+    contentByPage: { home: { title: "Home", heroTitle: "Approved heading", description: "Approved copy", cta: "Contact us", claimRefs: ["claim_home"] } },
+  }), /outside the frozen page plan/);
 });

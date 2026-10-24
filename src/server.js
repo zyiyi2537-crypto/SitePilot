@@ -316,6 +316,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           projectId: run.projectId,
           locales: input.locales || run.inputSnapshot.locale,
           contentByPage: input.contentByPage,
+          designDraft: design,
+          pagePlan: run.pagePlan,
         });
         return send(res, 200, { ...plan, candidateId: candidate.id, designDraftId: design?.id || null, designHash: design?.designHash || null, writesAllowed: false });
       }
@@ -563,6 +565,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             projectId: run.projectId,
             locales: input.locales || run.inputSnapshot.locale,
             contentByPage: input.contentByPage,
+            designDraft: design,
+            pagePlan: run.pagePlan,
           });
           pageOperations = plan.operations;
         } else if (!candidate.quality?.passed) {
@@ -577,6 +581,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           environment: "sandbox",
           designDraftId: design?.id || null,
           designHash: design?.designHash || null,
+          designMappings: plan?.designMappings || null,
         });
         const priorForKey = [...store.candidates.values()].find((item) => item.parentId === candidate.id && item.cmsSnapshot?.idempotencyKey === input.idempotencyKey);
         if (priorForKey) {
@@ -590,6 +595,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           candidateHash: candidate.candidateHash,
           designDraftId: design?.id || null,
           designHash: design?.designHash || null,
+          designMappings: plan?.designMappings || null,
           environment: "sandbox",
         });
         if (!receipt || receipt.candidateId !== candidate.id || receipt.status !== "sandbox_draft") {
@@ -603,6 +609,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         }
         if (design && (receipt?.designDraftId !== design.id || receipt?.designHash !== design.designHash)) {
           throw new PolicyError("Payload snapshot did not preserve the bound design revision", "STALE_REVISION");
+        }
+        if (plan && JSON.stringify(receipt.designMappings) !== JSON.stringify(plan.designMappings)) {
+          throw new PolicyError("Payload snapshot did not preserve the DesignDraft component mapping", "STALE_REVISION");
         }
         const existing = receipt.requestHash ? [...store.candidates.values()].find((item) => item.parentId === candidate.id && item.cmsSnapshot?.requestHash === receipt.requestHash) : null;
         const revision = existing || store.createPayloadCandidate(candidate.id, receipt);

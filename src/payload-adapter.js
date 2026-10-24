@@ -22,7 +22,7 @@ export class PayloadHttpSandboxBackend {
     this.allowedCollections = new Set(allowedCollections);
   }
 
-  async apply({ candidateId, candidateHash, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash }) {
+  async apply({ candidateId, candidateHash, expectedCmsSnapshot, operations, requestHash, designDraftId, designHash, designMappings }) {
     const records = [];
     for (const [operationIndex, operation] of operations.entries()) {
       if (!this.allowedCollections.has(operation.collection)) throw new PolicyError(`Payload collection is not allowed: ${operation.collection}`, "POLICY_DENIED");
@@ -35,6 +35,7 @@ export class PayloadHttpSandboxBackend {
       };
       if (designDraftId) headers["x-sitepilot-design-draft"] = designDraftId;
       if (designHash) headers["x-sitepilot-design-hash"] = designHash;
+      if (designMappings) headers["x-sitepilot-design-mapping-hash"] = hash(designMappings);
       if (candidateHash) headers["x-sitepilot-candidate-hash"] = candidateHash;
       headers["idempotency-key"] = `${requestHash}:${operationIndex}`;
       const response = await this.fetch(endpoint, {
@@ -55,8 +56,34 @@ function hash(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-export function computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], environment = "sandbox", designDraftId, designHash } = {}) {
-  return hash({ candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, pageOperations, environment, designDraftId: designDraftId || null, designHash: designHash || null });
+function isValidDesignMappings(value, designDraftId, designHash) {
+  if (!designDraftId || !designHash || !value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (value.schemaVersion !== "payload-website-block-map-v1" || value.designDraftId !== designDraftId || value.designHash !== designHash || !Array.isArray(value.pages) || value.pages.length < 1 || value.pages.length > 25) return false;
+  const pages = new Set();
+  const routes = new Set();
+  for (const page of value.pages) {
+    if (!page || typeof page.page !== "string" || !/^[a-z][a-z0-9-]{0,63}$/.test(page.page) || typeof page.route !== "string" || !page.route.startsWith("/") || page.route.length > 256 || !Array.isArray(page.claimRefs) || page.claimRefs.length > 100 || page.claimRefs.some((claim) => typeof claim !== "string" || claim.length > 200) || !Array.isArray(page.components) || page.components.length < 1 || page.components.length > 40) return false;
+    if (pages.has(page.page) || routes.has(page.route)) return false;
+    pages.add(page.page);
+    routes.add(page.route);
+    const instances = new Set();
+    let heroes = 0;
+    let layoutIndex = 0;
+    for (const component of page.components) {
+      if (!component || typeof component.instanceId !== "string" || component.instanceId.length > 128 || typeof component.registryId !== "string" || component.registryId.length > 128 || !/^[a-f0-9]{64}$/i.test(component.propsHash || "") || !["Hero", "Content", "CTA"].includes(component.name) || component.copyPolicy !== "approved_content_required") return false;
+      if (instances.has(component.instanceId)) return false;
+      instances.add(component.instanceId);
+      const expected = component.name === "Hero" ? { target: "hero", blockType: null } : { target: `layout[${layoutIndex++}]`, blockType: component.name === "Content" ? "content" : "cta" };
+      if (component.payloadTarget !== expected.target || component.blockType !== expected.blockType) return false;
+      if (component.name === "Hero") heroes += 1;
+    }
+    if (heroes !== 1 || page.components[0].name !== "Hero") return false;
+  }
+  return true;
+}
+
+export function computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], environment = "sandbox", designDraftId, designHash, designMappings } = {}) {
+  return hash({ candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, pageOperations, environment, designDraftId: designDraftId || null, designHash: designHash || null, designMappings: designMappings || null });
 }
 
 export class PayloadSandboxAdapter {
@@ -68,7 +95,7 @@ export class PayloadSandboxAdapter {
     this.pending = new Map();
   }
 
-  async createDraft({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash } = {}) {
+  async createDraft({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations = [], idempotencyKey, environment = "sandbox", designDraftId, designHash, designMappings } = {}) {
     if (!candidateId || !expectedCmsSnapshot) throw new PolicyError("candidate_id and expected CMS snapshot are required", "INVALID_INPUT");
     if (!idempotencyKey || typeof idempotencyKey !== "string") throw new PolicyError("idempotency_key is required", "INVALID_INPUT");
     if (environment !== "sandbox") throw new PolicyError("Payload writes are limited to the sandbox environment", "POLICY_DENIED");
@@ -76,7 +103,16 @@ export class PayloadSandboxAdapter {
     if (designDraftId !== undefined && (typeof designDraftId !== "string" || !designDraftId || designDraftId.length > 128)) throw new PolicyError("designDraftId is invalid", "INVALID_INPUT");
     if (designHash !== undefined && (typeof designHash !== "string" || !/^[a-f0-9]{64}$/i.test(designHash))) throw new PolicyError("designHash is invalid", "INVALID_INPUT");
     if (candidateHash !== undefined && (typeof candidateHash !== "string" || !/^[a-f0-9]{64}$/i.test(candidateHash))) throw new PolicyError("candidateHash is invalid", "INVALID_INPUT");
-    const requestHash = computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations, environment, designDraftId, designHash });
+    if (designMappings !== undefined && designMappings !== null) {
+      if (!isValidDesignMappings(designMappings, designDraftId, designHash)) {
+        throw new PolicyError("Design mapping must bind to the supplied DesignDraft revision", "STALE_REVISION");
+      }
+      if (JSON.stringify(designMappings).length > 128 * 1024) throw new PolicyError("Design mapping exceeds size limit", "INVALID_INPUT");
+      designMappings = structuredClone(designMappings);
+    } else {
+      designMappings = null;
+    }
+    const requestHash = computePayloadRequestHash({ candidateId, candidateHash, expectedCmsSnapshot, pageOperations, environment, designDraftId, designHash, designMappings });
     const previous = this.receipts.get(idempotencyKey);
     if (previous) {
       if (previous.requestHash !== requestHash) throw new PolicyError("Idempotency key was reused with different input", "IDEMPOTENCY_CONFLICT");
@@ -88,7 +124,7 @@ export class PayloadSandboxAdapter {
       return pending.promise;
     }
     this.validateOperations(pageOperations);
-    const intent = { candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, operations: pageOperations, requestHash, designDraftId: designDraftId || null, designHash: designHash || null };
+    const intent = { candidateId, candidateHash: candidateHash || null, expectedCmsSnapshot, operations: pageOperations, requestHash, designDraftId: designDraftId || null, designHash: designHash || null, designMappings };
     const promise = (async () => {
       const result = await this.backend.apply(intent);
       if (!result || typeof result.snapshotId !== "string") throw new PolicyError("Payload backend returned no snapshot receipt", "UNKNOWN_RESULT");
@@ -97,6 +133,7 @@ export class PayloadSandboxAdapter {
         candidateHash: candidateHash || null,
         designDraftId: designDraftId || null,
         designHash: designHash || null,
+        designMappings,
         cmsSnapshotId: result.snapshotId,
         idempotencyKey,
         cmsRecordRefs: result.recordRefs || [],

@@ -151,6 +151,7 @@ test("Payload create flow seals a CMS child candidate before QA", async () => {
       candidateHash: input.candidateHash,
       designDraftId: input.designDraftId,
       designHash: input.designHash,
+      designMappings: input.designMappings || null,
       cmsSnapshotId: "cms_snapshot_1",
       idempotencyKey: input.idempotencyKey,
       requestHash: computePayloadRequestHash(input),
@@ -167,8 +168,10 @@ test("Payload create flow seals a CMS child candidate before QA", async () => {
   const server = createServer(store, { apiToken: token, reviewerToken: "b".repeat(32), reviewerId: "reviewer-1" }, undefined, undefined, null, payload, quality);
   const project = store.createProject({ goal: "Build a product site", locale: ["en"] });
   const run = store.createRun(project.id);
-  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero", "Content"], locales: ["en"] };
-  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [
+    { name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } },
+  ] }] };
   const design = store.createDesignDraft(run.id);
   const parent = store.createCandidate(run.id, { designDraftId: design.id, codeArtifact: { head: "abc", designHash: design.designHash }, build: { passed: true, reportHash: "build_report_1" } });
 
@@ -193,6 +196,9 @@ test("Payload create flow seals a CMS child candidate before QA", async () => {
   assert.equal(parent.status, "superseded");
   assert.equal(payloadCalls[0].candidateHash, parent.candidateHash);
   assert.equal(payloadCalls[0].pageOperations[0].data.slug, "home");
+  assert.equal(payloadCalls[0].designMappings.designHash, design.designHash);
+  assert.equal(payloadCalls[0].designMappings.pages[0].components[0].instanceId, design.pageTree[0].components[0].instanceId);
+  assert.equal(draft.body.candidate.cmsSnapshot.designMappings.pages[0].components[0].payloadTarget, "hero");
 
   const replay = await request(server, "POST", `/candidates/${parent.id}/payload-draft`, token, {
     expectedCmsSnapshot: "cms_0",
@@ -225,7 +231,11 @@ test("Payload plan endpoint is read-only and binds customer claims to the design
   const project = store.createProject({ goal: "website", locale: ["en"] });
   const run = store.createRun(project.id);
   run.strategy = { pageHierarchy: ["home"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] };
-  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [
+    { name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } },
+    { name: "Content", registryId: "content", source: { repository: "payload", commit: "a".repeat(40), path: "Content.tsx" } },
+    { name: "CTA", registryId: "cta", source: { repository: "payload", commit: "a".repeat(40), path: "CTA.tsx" } },
+  ] }] };
   const design = store.createDesignDraft(run.id);
   const candidate = store.createCandidate(run.id, { designDraftId: design.id });
   const response = await request(server, "POST", `/candidates/${candidate.id}/payload-plan`, token, {
@@ -236,6 +246,8 @@ test("Payload plan endpoint is read-only and binds customer claims to the design
   assert.equal(response.body.candidateId, candidate.id);
   assert.equal(response.body.designDraftId, design.id);
   assert.equal(response.body.designHash, design.designHash);
+  assert.equal(response.body.designMappings.schemaVersion, "payload-website-block-map-v1");
+  assert.equal(response.body.designMappings.pages[0].components[0].payloadTarget, "hero");
   assert.equal(response.body.operations[0].data.slug, "home");
   assert.deepEqual(response.body.claimRefs, ["claim_home"]);
   assert.equal(candidate.cmsSnapshot, null);
