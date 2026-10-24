@@ -226,6 +226,64 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   assert.equal(blocked.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 2);
 });
 
+test("Review phase requires QA and persists a candidate-bound independent decision", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Review a generated website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "sitepilot-review-api-"));
+  const workspace = path.join(root, run.id, design.id);
+  await fs.mkdir(path.join(workspace, "src"), { recursive: true });
+  await fs.writeFile(path.join(workspace, "src", "App.tsx"), "export default function App() {}\n");
+  const candidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: { workspace, files: ["src/App.tsx"], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash } });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa_report_review_1", results: [{ check: "links", passed: true }] });
+  const faux = fauxProvider({ models: [{ id: "test-model" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_review", { whyNow: "QA 已通过，需要独立审查", expectedObservation: "得到绑定候选版本的 ReviewDecision", stopIf: ["源码发生变化"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_source_package", { sourceId: `candidate:${candidate.id}`, paths: ["src/App.tsx"] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("run_quality_checks", { candidateId: candidate.id, candidateHash: candidate.candidateHash }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_review_decision", { whyNow: "源码和 QA 报告均已检查", expectedObservation: "没有阻断性问题，交给人工 Reviewer", stopIf: ["QA 报告 hash 不匹配"], risk: "low", status: "approved", candidateId: candidate.id, candidateHash: candidate.candidateHash, qualityReportHash: candidate.quality.reportHash, summary: "独立只读检查通过", findings: [] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { whyNow: "ReviewDecision 已写入候选", expectedObservation: "流程停在人工最终审核", stopIf: ["候选版本变化"], risk: "low", summary: "Review 完成" }), { stopReason: "toolUse" }),
+  ]);
+  const server = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer" },
+    undefined,
+    undefined,
+    null,
+    null,
+    null,
+    { worktreeRoot: root },
+    undefined,
+    null,
+    null,
+    (config) => ({ endpoint: config.baseUrl, modelVersion: config.model, apiMode: config.apiMode, testConnection: async () => ({}) }),
+    () => ({ model: faux.getModel(), streamFn: (model, context, options) => models.streamSimple(model, context, options) }),
+  );
+  assert.equal((await request(server, "POST", "/model/config", apiToken, { baseUrl: "https://model.example/v1", model: "test-model", apiMode: "chat_completions", apiKey: "test-secret" })).status, 200);
+  const result = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "review", candidateId: candidate.id });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "review_approved");
+  assert.equal(result.body.reviewDecision.candidateHash, candidate.candidateHash);
+  assert.equal(result.body.reviewDecision.qualityReportHash, candidate.quality.reportHash);
+  assert.equal(result.body.review_approved, true);
+  assert.equal(candidate.independentReview.status, "approved");
+  assert.equal(store.artifactsForRun(run.id).filter((artifact) => artifact.type === "ReviewDecision").length, 1);
+  const repeated = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "review", candidateId: candidate.id });
+  assert.equal(repeated.status, 409);
+  assert.equal(repeated.body.code, "REVIEW_ALREADY_COMPLETED");
+  const failedCandidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: candidate.codeArtifact });
+  store.markQuality(failedCandidate.id, { passed: false, reportHash: "qa_report_failed" });
+  const blocked = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "review", candidateId: failedCandidate.id });
+  assert.equal(blocked.status, 422);
+  assert.equal(blocked.body.code, "QUALITY_GATE_REQUIRED");
+  await fs.rm(root, { recursive: true, force: true });
+});
+
 test("ContentCMS drafting stays below the Payload write grant", () => {
   assert.throws(() => createPiTool({
     role: "ContentCMS",

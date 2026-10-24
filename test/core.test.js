@@ -169,6 +169,20 @@ test("candidate cannot become draft before quality and review", () => {
   assert.equal(draft.status, "ready_for_review");
 });
 
+test("source candidates require an approved independent ReviewDecision before draft packaging", () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "source review gate" });
+  const run = store.createRun(project.id);
+  const candidate = store.createCandidate(run.id, { codeArtifact: { head: "a", files: ["src/App.tsx"] } });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa_source_1" });
+  assert.throws(() => store.packageReview(candidate.id, { approvedByReviewer: "reviewer" }), (error) => error.code === "REVIEW_GATE_REQUIRED");
+  candidate.independentReview = { status: "changes_requested", candidateId: candidate.id, candidateHash: candidate.candidateHash, qualityReportHash: "qa_source_1" };
+  assert.throws(() => store.packageReview(candidate.id, { approvedByReviewer: "reviewer" }), (error) => error.code === "REVIEW_GATE_REQUIRED");
+  candidate.independentReview = { status: "approved", candidateId: candidate.id, candidateHash: candidate.candidateHash, qualityReportHash: "qa_source_1" };
+  const draft = store.packageReview(candidate.id, { approvedByReviewer: "reviewer" });
+  assert.equal(draft.status, "ready_for_review");
+});
+
 test("candidate child revisions cannot cross project runs", () => {
   const store = new SitePilotStore();
   const firstProject = store.createProject({ goal: "first" });

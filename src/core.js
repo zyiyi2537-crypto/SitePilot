@@ -8,12 +8,14 @@ export const TOOLS = new Map([
   ["delegate_research", "L0"],
   ["delegate_content_cms", "L0"],
   ["delegate_coding", "L0"],
+  ["delegate_review", "L0"],
   ["request_customer_input", "L0"],
   ["complete_plan", "L0"],
   ["submit_site_strategy", "L0"],
   ["submit_component_plan", "L0"],
   ["submit_content_model", "L0"],
   ["submit_code_patch_plan", "L0"],
+  ["submit_review_decision", "L0"],
   ["retrieve_codeatlas", "L0"],
   ["inspect_payload_schema", "L0"],
   ["create_project_worktree", "L2"],
@@ -436,6 +438,12 @@ export class SitePilotStore {
     if (!candidate) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
     if (!candidate.quality?.passed) throw new PolicyError("Candidate has not passed quality gates", "SCHEMA_REJECTED");
     if (!review?.approvedByReviewer) throw new PolicyError("Review decision is required", "POLICY_DENIED");
+    if (candidate.codeArtifact?.files?.length) {
+      const independent = candidate.independentReview;
+      if (!independent || independent.status !== "approved" || independent.candidateId !== candidate.id || independent.candidateHash !== candidate.candidateHash || independent.qualityReportHash !== candidate.quality.reportHash) {
+        throw new PolicyError("Independent ReviewDecision is required for a source candidate", "REVIEW_GATE_REQUIRED");
+      }
+    }
     candidate.review = Object.freeze(review);
     candidate.status = "ready_for_review";
     const draft = Object.freeze({

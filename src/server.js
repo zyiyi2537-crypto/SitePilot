@@ -354,7 +354,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (hasRepository && (!codeAtlas || typeof codeAtlas.search !== "function")) return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
         if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
         let contentCms = null;
-        if (input.phase !== undefined && !["content", "coding"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
+        let review = null;
+        if (input.phase !== undefined && !["content", "coding", "review"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
         if (input.phase === "content") {
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
@@ -430,11 +431,40 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             fileCount: source.sourceFiles.length,
           };
         }
+        if (input.phase === "review") {
+          if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
+          const candidate = store.candidates.get(input.candidateId);
+          if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+          if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidate.quality?.passed) return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
+          if (!candidate.quality.reportHash || typeof candidate.quality.reportHash !== "string") return send(res, 422, { code: "QUALITY_REPORT_REQUIRED" });
+          if (run.reviewDecision?.candidateId === candidate.id && run.reviewDecision?.candidateHash === candidate.candidateHash && run.reviewDecision?.qualityReportHash === candidate.quality.reportHash) return send(res, 409, { code: "REVIEW_ALREADY_COMPLETED" });
+          if (!Array.isArray(candidate.codeArtifact?.files) || !candidate.codeArtifact.files.length) return send(res, 422, { code: "SOURCE_PACKAGE_REQUIRED" });
+          const source = await inspectCandidateSource(run, candidate);
+          review = {
+            reviewOnly: true,
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            candidate,
+            quality: candidate.quality,
+            qualityReportHash: candidate.quality.reportHash,
+            sourceId: `candidate:${candidate.id}`,
+            sourceFiles: source.sourceFiles,
+            sourceManifest: source.sourceManifest,
+            assertCurrent: async () => {
+              const currentHead = await source.assertCurrent();
+              const currentCandidate = store.candidates.get(candidate.id);
+              if (!currentCandidate || currentCandidate.candidateHash !== candidate.candidateHash || !currentCandidate.quality?.passed || currentCandidate.quality.reportHash !== candidate.quality.reportHash) throw new PolicyError("Candidate or QA report changed during Review", "STALE_REVISION");
+              return currentHead;
+            },
+            readFiles: source.readFiles,
+          };
+        }
         runningAgentRuns.add(run.id);
         try {
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
-          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding });
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding, review });
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
           const returnedContentModel = result.contentModel || (contentCms?.candidate ? run.contentModel : null);
           if (returnedContentModel) {
@@ -989,7 +1019,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

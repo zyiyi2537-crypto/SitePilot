@@ -120,3 +120,50 @@ test("role tool policy rejects a tool outside the role allowlist", () => {
     handler: async () => ({}),
   }), (error) => error instanceof PolicyError && error.code === "POLICY_DENIED");
 });
+
+test("independent Review agent reads only the candidate and QA evidence", async () => {
+  const store = new SitePilotStore();
+  const run = projectRun(store);
+  const candidateHash = "b".repeat(64);
+  const candidate = { id: "candidate_review_1", runId: run.id, candidateHash, quality: { passed: true, reportHash: "qa_report_1", results: [{ check: "links", passed: true }] }, independentReview: null };
+  const review = {
+    reviewOnly: true,
+    candidateId: candidate.id,
+    candidateHash,
+    candidate,
+    quality: candidate.quality,
+    qualityReportHash: candidate.quality.reportHash,
+    sourceId: `candidate:${candidate.id}`,
+    sourceFiles: ["src/App.tsx"],
+    sourceManifest: [{ path: "src/App.tsx", size: 24, sha256: "c".repeat(64) }],
+    assertCurrent: async () => "head_1",
+    readFiles: async (paths) => paths.map((path) => ({ path, sha256: "c".repeat(64), content: "export default function App() {}" })),
+  };
+  const runtime = fakeRuntime(store, [
+    fauxAssistantMessage(fauxToolCall("delegate_review", { whyNow: "QA 已通过，需要独立检查来源和实现", expectedObservation: "得到绑定当前候选和 QA 报告的 ReviewDecision", stopIf: ["候选源码发生变化"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_source_package", { sourceId: review.sourceId, paths: ["src/App.tsx"] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("run_quality_checks", { candidateId: candidate.id, candidateHash }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_review_decision", { whyNow: "源码和质量证据已绑定", expectedObservation: "没有阻断性问题且可交由人工审核", stopIf: ["QA hash 不匹配"], risk: "low", status: "approved", candidateId: candidate.id, candidateHash, qualityReportHash: candidate.quality.reportHash, summary: "当前候选通过独立只读检查", findings: [] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { whyNow: "独立 ReviewDecision 已生成", expectedObservation: "流程停在人工最终审核前", stopIf: ["候选版本变化"], risk: "low", summary: "Review 已完成" }), { stopReason: "toolUse" }),
+  ]);
+  const result = await runCreationSupervisor({ run, runtime, store, toolRuntime: new ToolRuntime({ store }), review });
+  assert.equal(result.status, "review_approved");
+  assert.equal(result.reviewDecision.candidateHash, candidateHash);
+  assert.equal(result.reviewDecision.qualityReportHash, "qa_report_1");
+  assert.equal(result.independent_review_required, true);
+  assert.equal(result.review_approved, true);
+  assert.equal(store.artifactsForRun(run.id).at(-1).type, "ReviewDecision");
+  assert.equal(candidate.independentReview.status, "approved");
+  assert.ok(store.audit.some((event) => event.type === "agent.delegation.completed" && event.data.role === "Review"));
+});
+
+test("Review agent cannot use write or L2 tools", () => {
+  const store = new SitePilotStore();
+  assert.throws(() => createPiTool({
+    role: "Review",
+    name: "apply_code_patch",
+    runContext: { runId: "run_review", agentRunId: "agent_review", inputSnapshotId: "snapshot_review", grant: { level: "L0" } },
+    toolRuntime: new ToolRuntime({ store, handlers: {} }),
+    handler: async () => ({}),
+  }), (error) => error instanceof PolicyError && error.code === "POLICY_DENIED");
+});
