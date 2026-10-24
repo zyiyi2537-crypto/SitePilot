@@ -134,6 +134,8 @@ jobs:
           cp ci/payload-preview.ts payload-source/templates/website/sitepilot-preview.ts
           cp ci/payload-command.mjs payload-source/templates/website/sitepilot-command.mjs
           cp ci/payload-typecheck.mjs payload-source/templates/website/sitepilot-typecheck.mjs
+          cp src/core.js payload-source/templates/website/sitepilot-core.mjs
+          sed 's/from "\.\/core\.js"/from "\.\/sitepilot-core.mjs"/' src/payload-adapter.js > payload-source/templates/website/sitepilot-payload-adapter.mjs
           password=$(openssl rand -hex 24)
           preview_secret=$(openssl rand -hex 24)
           echo "::add-mask::$password"
@@ -189,6 +191,7 @@ jobs:
           path: |
             ci-results/draft-plan.json
             payload-source/templates/website/sitepilot-cms-receipt.json
+            payload-source/templates/website/sitepilot-http-cms-receipt.json
             payload-source/templates/website/sitepilot-preview-report.json
             payload-source/templates/website/sitepilot-typecheck-report.json
             payload-source/templates/website/sitepilot-server.log

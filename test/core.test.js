@@ -523,16 +523,33 @@ test("Payload HTTP backend writes only draft records to an HTTPS sandbox", async
   const backend = new PayloadHttpSandboxBackend({
     baseUrl: "https://payload-sandbox.example.test",
     token: "sandbox-token",
-    fetchImpl: async (url, options) => { requests.push({ url, options }); return { ok: true, json: async () => ({ doc: { id: "page_1" } }) }; },
+    fetchImpl: async (url, options) => {
+      requests.push({ url, options });
+      return options.method === "POST"
+        ? { ok: true, json: async () => ({ doc: { id: "page_1" } }) }
+        : { ok: true, json: async () => ({ id: "page_1", slug: "home", title: "Home", _status: "draft" }) };
+    },
   });
   const designMappings = { schemaVersion: "payload-website-block-map-v1", designDraftId: "design_1", designHash: "a".repeat(64), pages: [] };
   const result = await backend.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", designDraftId: "design_1", designHash: "a".repeat(64), designMappings, operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] });
   assert.equal(result.recordRefs[0].id, "page_1");
   assert.equal(requests[0].options.method, "POST");
-  assert.match(requests[0].options.body, /"_status":"draft"/);
+  assert.equal(requests.length, 2);
+  assert.match(requests[0].url, /locale=en$/);
+  assert.deepEqual(JSON.parse(requests[0].options.body), { slug: "home", title: "Home", _status: "draft" });
+  assert.equal(requests[1].options.method, "GET");
+  assert.match(requests[1].url, /\/page_1\?draft=true&depth=0&locale=en$/);
   assert.equal(requests[0].options.headers["x-sitepilot-design-draft"], "design_1");
   assert.equal(requests[0].options.headers["x-sitepilot-design-hash"], "a".repeat(64));
   assert.equal(requests[0].options.headers["x-sitepilot-design-mapping-hash"], crypto.createHash("sha256").update(JSON.stringify(designMappings)).digest("hex"));
+  const mismatchingReadback = new PayloadHttpSandboxBackend({
+    baseUrl: "https://payload-sandbox.example.test",
+    token: "sandbox-token",
+    fetchImpl: async (_url, options) => options.method === "POST"
+      ? { ok: true, json: async () => ({ doc: { id: "page_1" } }) }
+      : { ok: true, json: async () => ({ id: "page_1", slug: "home", title: "Changed", _status: "draft" }) },
+  });
+  await assert.rejects(() => mismatchingReadback.apply({ candidateId: "candidate_1", expectedCmsSnapshot: "cms_0", requestHash: "hash_1", operations: [{ type: "upsert_page", collection: "pages", locale: "en", data: { slug: "home", title: "Home" } }] }), /readback differs/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "http://insecure.test", token: "x" }), /HTTPS/);
   assert.throws(() => new PayloadHttpSandboxBackend({ baseUrl: "https://127.0.0.1", token: "x" }), /private or reserved/);
 });

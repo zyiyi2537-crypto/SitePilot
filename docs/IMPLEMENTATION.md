@@ -78,7 +78,7 @@ Input: candidate ID, expected CMS snapshot, page operations, and idempotency key
 
 `src/payload-adapter.js` implements the V0 boundary. It accepts only bounded page/global/media/form operations in a sandbox environment, rejects disallowed collections, locales and secret-shaped fields, and stores idempotent receipts. The backend is deliberately injected so a real Payload API client can be added without giving the Agent production credentials or promotion controls.
 
-`PayloadHttpSandboxBackend` is the real HTTP backend. It requires an HTTPS sandbox URL and a server-side bearer token, posts only allowlisted collections as drafts, attaches the candidate/request hash, and rejects responses without a record ID. It does not expose a publish or preview-pointer operation.
+`PayloadHttpSandboxBackend` requires an HTTPS sandbox URL and a server-side bearer token. It writes only operation fields (not SitePilot-only fields that are absent from the upstream schema), sends locale as an API query parameter, then reads the draft back and compares every submitted field before returning a receipt. The Payload CI now drives this backend against the real ephemeral REST API, checks anonymous draft isolation, and opens the HTTP-created draft in authenticated desktop/mobile preview. The standard Payload REST API does not enforce SitePilot's idempotency or compare-and-swap headers; durable atomic idempotency still requires the planned server-side sandbox bridge before this backend is suitable for multi-worker or production use.
 
 ### SourcePackageInspector
 

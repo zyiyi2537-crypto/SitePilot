@@ -1,6 +1,8 @@
 import fs from 'node:fs/promises'
 import assert from 'node:assert/strict'
+import crypto from 'node:crypto'
 import { chromium, expect, type APIResponse } from '@playwright/test'
+import { PayloadHttpSandboxBackend, computePayloadRequestHash } from './sitepilot-payload-adapter.mjs'
 
 assert.equal(process.env.CI, '1')
 assert.ok(process.env.SITEPILOT_CI_PASSWORD)
@@ -10,20 +12,82 @@ const plan = JSON.parse(await fs.readFile('./sitepilot-draft-plan.json', 'utf8')
 const designPage = plan.designMappings?.pages?.find((item: { page: string }) => item.page === 'sitepilot-ci')
 assert.ok(designPage, 'preview plan must carry the synthetic DesignDraft mapping')
 assert.deepEqual(designPage.components.map((component: { name: string }) => component.name), ['Hero', 'Content', 'CTA'])
+const httpPlan = plan.httpDraft
+assert.equal(httpPlan?.designMappings?.designDraftId, 'design_ci_http')
+assert.equal(httpPlan?.designMappings?.pages?.[0]?.route, '/sitepilot-http-ci')
+const serviceLogin = await fetch(`${baseURL}/api/users/login`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ email: 'sitepilot-ci@example.invalid', password: process.env.SITEPILOT_CI_PASSWORD }),
+})
+assert.equal(serviceLogin.status, 200)
+const serviceAuth = await serviceLogin.json() as { token?: string }
+assert.ok(serviceAuth.token, 'Payload login must provide a bearer token for the sandbox adapter')
+const httpCandidate = { id: 'candidate_ci_http', hash: 'c'.repeat(64) }
+const httpOperation = structuredClone(httpPlan.operations[0])
+const httpDesignMappings = httpPlan.designMappings
+const expectedCmsSnapshot = 'ci_empty_snapshot'
+const requestHash = computePayloadRequestHash({
+  candidateId: httpCandidate.id,
+  candidateHash: httpCandidate.hash,
+  expectedCmsSnapshot,
+  pageOperations: [httpOperation],
+  environment: 'sandbox',
+  designDraftId: httpDesignMappings.designDraftId,
+  designHash: httpDesignMappings.designHash,
+  designMappings: httpDesignMappings,
+})
+const sandboxOrigin = 'https://payload-sandbox.invalid'
+const sandboxRequests: { url: string; method: string; headers: HeadersInit }[] = []
+const sandboxBackend = new PayloadHttpSandboxBackend({
+  baseUrl: sandboxOrigin,
+  token: serviceAuth.token,
+  fetchImpl: async (url, options) => {
+    const target = new URL(url)
+    assert.equal(target.origin, sandboxOrigin)
+    sandboxRequests.push({ url: target.href, method: options.method, headers: options.headers })
+    return fetch(new URL(`${target.pathname}${target.search}`, baseURL), options)
+  },
+})
+const sandboxReceipt = await sandboxBackend.apply({
+  candidateId: httpCandidate.id,
+  candidateHash: httpCandidate.hash,
+  expectedCmsSnapshot,
+  operations: [httpOperation],
+  requestHash,
+  designDraftId: httpDesignMappings.designDraftId,
+  designHash: httpDesignMappings.designHash,
+  designMappings: httpDesignMappings,
+})
+assert.equal(sandboxReceipt.recordRefs.length, 1)
+assert.equal(sandboxRequests.length, 2, 'HTTP sandbox adapter must write and read back the Payload draft')
+assert.deepEqual(sandboxRequests.map((item) => item.method), ['POST', 'GET'])
+assert.equal(new Headers(sandboxRequests[0].headers).get('x-sitepilot-design-hash'), httpDesignMappings.designHash)
+assert.equal(new Headers(sandboxRequests[0].headers).get('x-sitepilot-design-mapping-hash'), crypto.createHash('sha256').update(JSON.stringify(httpDesignMappings)).digest('hex'))
+assert.equal(new Headers(sandboxRequests[0].headers).get('idempotency-key'), `${requestHash}:0`)
+await fs.writeFile('./sitepilot-http-cms-receipt.json', JSON.stringify({
+  synthetic: true, candidateId: httpCandidate.id, candidateHash: httpCandidate.hash,
+  designDraftId: httpDesignMappings.designDraftId, designHash: httpDesignMappings.designHash,
+  requestHash, recordRefs: sandboxReceipt.recordRefs, readbackVerified: true,
+}, null, 2))
 const browser = await chromium.launch()
 const checks: string[] = []
 try {
   const anonymous = await browser.newContext({ baseURL })
-  const publicDraft = await anonymous.request.get('/api/pages?where[slug][equals]=sitepilot-ci&draft=true')
-  assert.equal(publicDraft.status(), 200)
-  assert.equal((await publicDraft.json()).totalDocs, 0)
-  checks.push('anonymous REST request cannot read draft')
+  for (const slug of ['sitepilot-ci', 'sitepilot-http-ci']) {
+    const publicDraft = await anonymous.request.get(`/api/pages?where[slug][equals]=${slug}&draft=true`)
+    assert.equal(publicDraft.status(), 200)
+    assert.equal((await publicDraft.json()).totalDocs, 0)
+  }
+  checks.push('anonymous REST requests cannot read either draft')
   const denied = await anonymous.request.get(`/next/preview?path=/sitepilot-ci&previewSecret=${encodeURIComponent(process.env.PREVIEW_SECRET!)}`, { maxRedirects: 0 })
   assert.equal(denied.status(), 403)
   checks.push('preview secret without reviewer login is denied')
   const page = await anonymous.newPage()
   const publicPage = await page.goto(`${baseURL}/sitepilot-ci`)
   assert.equal(publicPage?.status(), 404)
+  const publicHttpPage = await page.goto(`${baseURL}/sitepilot-http-ci`)
+  assert.equal(publicHttpPage?.status(), 404)
   checks.push('anonymous website route returns 404 for draft')
   await anonymous.close()
 
@@ -61,6 +125,14 @@ try {
     assert.equal(overflow, false, `${name} horizontal overflow`)
     await page.screenshot({ path: `sitepilot-${name}.png`, fullPage: true })
     checks.push(`${name}: authenticated draft renders CMS hero, content, CTA and SEO without client errors or overflow`)
+    const httpPreview = await context.request.get(`/next/preview?path=/sitepilot-http-ci&previewSecret=${encodeURIComponent(process.env.PREVIEW_SECRET!)}`, { maxRedirects: 0 })
+    assert.equal(httpPreview.status(), 307)
+    const httpPage = await context.newPage()
+    const httpResponse = await httpPage.goto(`${baseURL}/sitepilot-http-ci`)
+    assert.equal(httpResponse?.status(), 200)
+    await expect(httpPage.getByRole('heading', { name: 'SitePilot CMS draft preview', exact: true })).toBeVisible()
+    await expect(httpPage.locator('article')).toContainText('Synthetic content generated by the SitePilot draft planner')
+    await httpPage.close()
     await context.close()
   }
   await fs.writeFile('./sitepilot-preview-report.json', JSON.stringify({

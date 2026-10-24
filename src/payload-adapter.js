@@ -10,6 +10,16 @@ function assertPublicHost(url) {
   if (host === "localhost" || host === "metadata.google.internal" || host === "169.254.169.254" || host === "::1" || host.startsWith("127.") || host.startsWith("10.") || host.startsWith("192.168.") || /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)) throw new PolicyError("Payload sandbox host is private or reserved", "SSRF_BLOCKED");
 }
 
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  return value;
+}
+
+function payloadFieldsMatch(actual, expected) {
+  return Object.entries(expected).every(([key, value]) => JSON.stringify(canonical(actual?.[key])) === JSON.stringify(canonical(value)));
+}
+
 export class PayloadHttpSandboxBackend {
   constructor({ baseUrl, token, fetchImpl = globalThis.fetch, allowedCollections = ["pages", "posts", "media", "categories", "forms", "globals"] } = {}) {
     if (!baseUrl || !token || typeof fetchImpl !== "function") throw new PolicyError("Payload sandbox URL, token and fetch are required", "CONFIG_REQUIRED");
@@ -26,7 +36,6 @@ export class PayloadHttpSandboxBackend {
     const records = [];
     for (const [operationIndex, operation] of operations.entries()) {
       if (!this.allowedCollections.has(operation.collection)) throw new PolicyError(`Payload collection is not allowed: ${operation.collection}`, "POLICY_DENIED");
-      const body = { ...operation.data, _sitepilotCandidateId: candidateId, _sitepilotCandidateHash: candidateHash, _sitepilotRequestHash: requestHash };
       const endpoint = `${this.baseUrl}/api/${encodeURIComponent(operation.collection)}`;
       const headers = {
         authorization: `Bearer ${this.token}`,
@@ -38,15 +47,29 @@ export class PayloadHttpSandboxBackend {
       if (designMappings) headers["x-sitepilot-design-mapping-hash"] = hash(designMappings);
       if (candidateHash) headers["x-sitepilot-candidate-hash"] = candidateHash;
       headers["idempotency-key"] = `${requestHash}:${operationIndex}`;
-      const response = await this.fetch(endpoint, {
+      const collectionUrl = new URL(endpoint);
+      if (operation.locale) collectionUrl.searchParams.set("locale", operation.locale);
+      const response = await this.fetch(collectionUrl.href, {
         method: "POST",
         headers,
-        body: JSON.stringify({ ...body, _status: "draft", locale: operation.locale }),
+        body: JSON.stringify({ ...operation.data, _status: "draft" }),
       });
       if (!response.ok) throw new PolicyError(`Payload sandbox rejected ${operation.collection}: HTTP ${response.status}`, "CMS_REJECTED");
       const result = await response.json();
-      if (!result?.doc?.id && !result?.id) throw new PolicyError("Payload sandbox returned no record id", "CMS_INVALID_RECEIPT");
-      records.push({ collection: operation.collection, id: result.doc?.id || result.id });
+      const recordId = result?.doc?.id || result?.id;
+      if (!recordId) throw new PolicyError("Payload sandbox returned no record id", "CMS_INVALID_RECEIPT");
+      const readbackUrl = new URL(`${endpoint}/${encodeURIComponent(recordId)}`);
+      readbackUrl.searchParams.set("draft", "true");
+      readbackUrl.searchParams.set("depth", "0");
+      if (operation.locale) readbackUrl.searchParams.set("locale", operation.locale);
+      const readbackResponse = await this.fetch(readbackUrl.href, { method: "GET", headers: { authorization: `Bearer ${this.token}` } });
+      if (!readbackResponse.ok) throw new PolicyError(`Payload sandbox draft could not be read back: HTTP ${readbackResponse.status}`, "CMS_INVALID_RECEIPT");
+      const readbackResult = await readbackResponse.json();
+      const document = readbackResult?.doc || readbackResult;
+      if (String(document?.id) !== String(recordId) || document?._status !== "draft" || !payloadFieldsMatch(document, { ...operation.data, _status: "draft" })) {
+        throw new PolicyError("Payload sandbox readback differs from the submitted draft", "CMS_INVALID_RECEIPT");
+      }
+      records.push({ collection: operation.collection, id: recordId });
     }
     return { snapshotId: `payload_${requestHash.slice(0, 24)}`, recordRefs: records, diff: operations.map((operation) => `${operation.collection}/${operation.data.slug || operation.data.id || "new"}`) };
   }
