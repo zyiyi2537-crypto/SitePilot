@@ -6,8 +6,11 @@ on:
     paths:
       - .github/workflows/payload-website-build.yml
       - ci/payload-*
+      - src/core.js
+      - src/payload-adapter.js
       - src/payload-template.js
       - sources/payload-website.lock.json
+      - test/core.test.js
 
 permissions:
   contents: read
