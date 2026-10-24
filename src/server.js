@@ -263,11 +263,48 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (hasRepository !== hasCommit) return send(res, 422, { code: "INVALID_INPUT", message: "repository and full expectedCommit must be supplied together" });
         if (hasRepository && (!codeAtlas || typeof codeAtlas.search !== "function")) return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
         if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
+        let contentCms = null;
+        if (input.phase !== undefined && input.phase !== "content") return send(res, 422, { code: "INVALID_AGENT_PHASE" });
+        if (input.phase === "content") {
+          if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
+          const candidate = store.candidates.get(input.candidateId);
+          if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+          if (!run.strategy || !run.research) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
+          if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+          const designDraft = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+          if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+          const snapshot = evidence.snapshot(run.projectId);
+          const sourceById = new Map(snapshot.sources.map((source) => [source.id, source]));
+          const recordById = new Map(snapshot.records.filter((record) => record.status === "active").map((record) => [record.id, record]));
+          const claims = snapshot.claims.filter((claim) => claim.status === "supported")
+            .map((claim) => ({ claim, records: claim.evidenceIds.map((id) => recordById.get(id)).filter(Boolean) }))
+            .filter(({ claim, records }) => claim.evidenceIds.length > 0 && records.length === claim.evidenceIds.length && records.every((record) => sourceById.get(record.sourceId)?.kind === "client"))
+            .slice(0, 30);
+          const allowedClaimRefs = claims.map(({ claim }) => claim.id);
+          const customerFacts = claims.map(({ claim, records }) => ({
+            claimId: claim.id,
+            statement: claim.statement.slice(0, 500),
+            evidence: records.slice(0, 3).map((record) => ({ quote: record.quote.slice(0, 1200), locator: record.locator.slice(0, 300), version: String(record.sourceVersion).slice(0, 120) })),
+          }));
+          contentCms = {
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            candidate,
+            designDraft,
+            pagePlan: run.pagePlan,
+            payloadSchema: run.payloadSchema,
+            customerFacts,
+            allowedClaimRefs,
+            contentOnly: true,
+          };
+        }
         runningAgentRuns.add(run.id);
         try {
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
-          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" } });
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms });
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
           store.persist?.();
           return send(res, 200, result);

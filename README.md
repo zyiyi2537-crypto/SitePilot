@@ -2,7 +2,7 @@
 
 Natural-language intake supports OpenAI-compatible Chat Completions and Responses API endpoints. In Studio, enter the provider URL, model, API key, and protocol, then test and apply the configuration. Studio credentials live only in page/process memory; they are not returned, logged, or saved to the database. Managed installs may instead set `SITEPILOT_MODEL_BASE_URL`, `SITEPILOT_MODEL_API_KEY`, `SITEPILOT_MODEL_NAME`, and `SITEPILOT_MODEL_API_MODE`. Requirement previews expire after 15 minutes and create no project until confirmation. Extracted facts require source evidence; unsupported facts remain blocked.
 
-SitePilot is an evidence-driven website delivery system organized around a Supervisor and specialist agents. Pi currently powers the first model-directed workflow, `Supervisor → Architect → Research → Supervisor`: it creates a strategy, searches only a server-approved CodeAtlas repository at a fixed commit, and persists structured artifacts and decision records. ContentCMS, Coding, QA and Review are not yet dispatched by the Pi Supervisor; writes remain behind existing worktree, sandbox, grant and review gates.
+SitePilot is an evidence-driven website delivery system organized around a Supervisor and specialist agents. Pi powers `Supervisor → Architect → Research` and a candidate-bound ContentCMS drafting stage. ContentCMS produces a proposed, Claim-referenced ContentModel only after the current design, page plan and build are ready; missing facts stop for customer input. It runs without Payload write permission, and its output is not approved content. Coding, QA and Review are not yet dispatched by the Pi Supervisor; writes remain behind existing worktree, sandbox, grant and review gates.
 
 ## Local development status (2026-10)
 

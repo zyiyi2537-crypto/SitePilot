@@ -181,7 +181,8 @@ function renderDelivery(result) {
   const hasPlan = Boolean(currentRun?.pagePlan && designDraft);
   const alreadyGenerated = currentRun?.candidateIds?.some((id) => currentCandidate?.id === id && currentCandidate.designDraftId === designDraft?.id);
   $("#create-candidate").disabled = !hasPlan || Boolean(alreadyGenerated);
-  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
+  $("#generate-content").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
+  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot) || !$("#content-reviewed").checked;
   $("#start-preview").disabled = !currentCandidate?.build?.passed;
   $("#run-qa").disabled = !currentCandidate || !currentPreview;
   if (!currentCandidate) status.textContent = hasPlan ? "设计已就绪，可以生成代码候选。" : "需要先生成页面计划和设计草稿。";
@@ -428,8 +429,27 @@ $("#create-candidate").onclick = () => action(async () => {
   await showRun();
   renderDelivery({ candidate: result.candidate, build: result.build });
 });
+$("#generate-content").onclick = () => action(async () => {
+  if (!runId || !currentCandidate?.build?.passed) throw new Error("请先生成通过构建门禁的候选");
+  $("#content-reviewed").checked = false;
+  renderDelivery();
+  const button = $("#generate-content"); button.disabled = true; button.textContent = "Agent 整理中…";
+  try {
+    const result = await api("POST", `/runs/${encodeURIComponent(runId)}/agent`, { phase: "content", candidateId: currentCandidate.id });
+    if (result.contentModel?.status === "proposed") {
+      $("#payload-content").value = JSON.stringify(result.contentModel.contentByPage, null, 2);
+      $("#content-reviewed").checked = false;
+    }
+    renderDelivery({ status: result.status, questions: result.questions, contentModel: result.contentModel });
+    await showRun();
+    return result.status === "needs_input" ? "内容 Agent 发现缺少事实资料，已返回待补问题" : "内容草案已生成，请核对 Claim 引用后再提交 CMS";
+  } finally { button.textContent = "Agent 生成内容草案"; }
+});
+$("#content-reviewed").onchange = () => renderDelivery();
+$("#payload-content").oninput = () => { $("#content-reviewed").checked = false; renderDelivery(); };
 $("#create-payload").onclick = () => action(async () => {
   if (!currentCandidate) throw new Error("请先生成候选");
+  if (!$("#content-reviewed").checked) throw new Error("请先核对客户内容和 Claim 引用");
   let contentByPage;
   try { contentByPage = JSON.parse($("#payload-content").value); } catch { throw new Error("客户内容必须是 JSON 对象"); }
   if (!contentByPage || typeof contentByPage !== "object" || Array.isArray(contentByPage)) throw new Error("客户内容必须是 JSON 对象");

@@ -9,6 +9,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
+import { createPiTool } from "../src/agent-tools.js";
 
 const apiToken = "a".repeat(32);
 const reviewerToken = "b".repeat(32);
@@ -111,4 +112,83 @@ test("Studio can run the Pi Supervisor workflow and read its persisted state", a
   assert.ok(decisionStatus.body.decisions.every((decision) => decision.whyNow && decision.expectedObservation && Array.isArray(decision.stopIf)));
   const modelStatus = await request(server, "GET", "/model/status", apiToken);
   assert.equal(JSON.stringify(modelStatus.body).includes("test-secret"), false);
+});
+
+test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen design", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Build a concise product website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"], strategy: "content-conversion" };
+  run.research = { repository: "payload", commit: "a".repeat(40), componentPlan: { decisions: [] }, evidence: [] };
+  run.pagePlan = { sourceManifestHash: "pageplan_hash", routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const candidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: { designHash: design.designHash } });
+  const evidence = new (await import("../src/evidence.js")).EvidenceStore();
+  const sourceRecord = evidence.registerSource({ projectId: project.id, kind: "client", name: "facts.md", content: "Approved product facts" });
+  const record = evidence.addRecord({ sourceId: sourceRecord.id, locator: "line:1", quote: "Approved product facts" });
+  const claim = evidence.createClaim({ projectId: project.id, statement: "Approved product fact", evidenceIds: [record.id], status: "supported" });
+  assert.equal(store.projects.get(project.id).goal, "Build a concise product website");
+  const faux = fauxProvider({ models: [{ id: "test-model" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_content_cms", { whyNow: "设计和页面计划已冻结", expectedObservation: "得到绑定设计版本的内容模型", stopIf: ["Claim 不足"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_payload_schema", { collection: "pages" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_content_model", { status: "proposed", contentByPage: { home: { title: "Home", heroTitle: "Approved product", description: "Approved description", claimRefs: [claim.id] } }, whyNow: "当前页面已有客户事实", expectedObservation: "内容模型绑定当前设计并可供 Payload 规划", stopIf: ["事实或 Claim 不完整"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { summary: "ContentModel is proposed for review", whyNow: "内容模型已经结构化", expectedObservation: "客户审核后进入 Payload 规划", stopIf: ["客户未确认"], risk: "medium" }), { stopReason: "toolUse" }),
+  ]);
+  const server = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer" },
+    evidence,
+    undefined,
+    null,
+    null,
+    null,
+    null,
+    undefined,
+    null,
+    null,
+    (config) => ({ endpoint: config.baseUrl, modelVersion: config.model, apiMode: config.apiMode, testConnection: async () => ({}) }),
+    () => ({ model: faux.getModel(), streamFn: (model, context, options) => models.streamSimple(model, context, options) }),
+  );
+  const configured = await request(server, "POST", "/model/config", apiToken, { baseUrl: "https://model.example/v1", model: "test-model", apiMode: "chat_completions", apiKey: "test-secret" });
+  assert.equal(configured.status, 200);
+  const result = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "content", candidateId: candidate.id });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.status, "content_review_required");
+  assert.equal(result.body.contentModel.status, "proposed");
+  assert.equal(result.body.contentModel.designDraftId, design.id);
+  assert.deepEqual(result.body.contentModel.contentByPage.home.claimRefs, [claim.id]);
+  assert.equal(result.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 1);
+  assert.equal(candidate.cmsSnapshot, null);
+
+  const untrustedCandidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: { designHash: design.designHash } });
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_content_cms", { whyNow: "需要校验候选内容", expectedObservation: "输出设计版本绑定的内容模型", stopIf: ["证据不足"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_payload_schema", { collection: "pages" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_content_model", { status: "proposed", contentByPage: { home: { title: "Home", heroTitle: "Unsupported claim", claimRefs: ["claim_forged"] } }, whyNow: "尝试提交模型输出", expectedObservation: "服务器校验 Claim 归属", stopIf: ["引用无效"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_content_model", { status: "needs_input", questions: [{ field: "productFacts", question: "请提供可验证的产品资料。", reason: "内容模型引用了不存在的 Claim。" }], whyNow: "页面事实没有有效 Claim", expectedObservation: "客户补充证据后再生成内容", stopIf: ["仍无客户证据"], risk: "medium" }), { stopReason: "toolUse" }),
+  ]);
+  const blocked = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "content", candidateId: untrustedCandidate.id, allowedClaimRefs: ["claim_forged"] });
+  assert.equal(blocked.status, 200);
+  assert.equal(blocked.body.status, "needs_input");
+  assert.equal(untrustedCandidate.cmsSnapshot, null);
+  assert.equal(store.audit.some((event) => event.runId === run.id && event.type === "payload.draft.created"), false);
+  assert.equal(blocked.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 2);
+});
+
+test("ContentCMS drafting stays below the Payload write grant", () => {
+  assert.throws(() => createPiTool({
+    role: "ContentCMS",
+    name: "create_payload_draft",
+    runContext: { runId: "run_1", agentRunId: "run_1:contentcms:1", inputSnapshotId: "snapshot:run_1", grant: { level: "L0" } },
+    handler: async () => ({ accepted: true }),
+  }), /requires L1 permission/);
+  assert.throws(() => createPiTool({
+    role: "Research",
+    name: "submit_content_model",
+    runContext: { runId: "run_1", agentRunId: "run_1:research:1", inputSnapshotId: "snapshot:run_1", grant: { level: "L0" } },
+    handler: async () => ({ accepted: true }),
+  }), /cannot use submit_content_model/);
 });

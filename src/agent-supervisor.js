@@ -25,19 +25,83 @@ function promptForResearch(run, strategy, repository, expectedCommit) {
   });
 }
 
+function promptForContentCMS(run, strategy, research, context = {}) {
+  return JSON.stringify({
+    task: "Create a proposed ContentModel for the frozen website design.",
+    output: "Inspect the Payload schema, then call submit_content_model. Use only supplied customer facts and project Claim references backed by active client evidence. Never invent product parameters, credentials, testimonials, SEO facts, or legal claims. Missing or unsupported facts must be returned with status needs_input and customer questions. Generated copy is always proposed, never approved.",
+    requirement: run.inputSnapshot,
+    strategy,
+    componentPlan: research?.componentPlan || research,
+    candidate: context.candidate ? { id: context.candidate.id, candidateHash: context.candidate.candidateHash, designDraftId: context.candidate.designDraftId } : null,
+    designDraft: context.designDraft ? { id: context.designDraft.id, designHash: context.designDraft.designHash, pageTree: context.designDraft.pageTree } : null,
+    customerFacts: context.customerFacts || [],
+    approvedClaimRefs: context.allowedClaimRefs || [],
+  });
+}
+
+function validateContentModel(contentByPage, { strategy, designDraft, pagePlan, allowedClaimRefs = [] } = {}) {
+  if (!contentByPage || typeof contentByPage !== "object" || Array.isArray(contentByPage)) {
+    throw new PolicyError("ContentModel must contain a page map", "SCHEMA_REJECTED");
+  }
+  const pages = Array.isArray(strategy?.pageHierarchy) ? strategy.pageHierarchy : [];
+  if (pages.length < 1 || pages.length > 12) throw new PolicyError("ContentModel has no bounded SiteStrategy page hierarchy", "SCHEMA_REJECTED");
+  const allowedPages = new Set(pages);
+  const suppliedPages = Object.keys(contentByPage);
+  const missing = pages.filter((page) => !contentByPage[page]);
+  const unknown = suppliedPages.filter((page) => !allowedPages.has(page));
+  if (unknown.length) throw new PolicyError(`ContentModel contains pages outside SiteStrategy: ${unknown.join(", ")}`, "SCHEMA_REJECTED");
+  if (missing.length) throw new PolicyError(`ContentModel is missing approved content for: ${missing.join(", ")}`, "NEEDS_INPUT");
+  const claimAllowlist = new Set(allowedClaimRefs);
+  const designPages = designDraft?.pageTree?.map((page) => page.page) || [];
+  if (!designDraft?.id || !/^[a-f0-9]{64}$/i.test(designDraft.designHash || "") || pages.length !== designPages.length || pages.some((page) => !designPages.includes(page))) {
+    throw new PolicyError("ContentModel must bind to the current DesignDraft pages", "STALE_REVISION");
+  }
+  const plannedPages = pagePlan?.routes?.map((page) => page.page) || [];
+  if (pages.length !== plannedPages.length || pages.some((page) => !plannedPages.includes(page))) {
+    throw new PolicyError("ContentModel must bind to the current PagePlan", "STALE_REVISION");
+  }
+  const normalized = {};
+  for (const page of pages) {
+    const value = contentByPage[page];
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new PolicyError(`ContentModel page is invalid: ${page}`, "SCHEMA_REJECTED");
+    const fields = ["title", "heroTitle", "description", "cta", "metaTitle", "metaDescription"];
+    const allowedFields = new Set([...fields, "claimRefs"]);
+    if (Object.keys(value).some((field) => !allowedFields.has(field))) throw new PolicyError(`ContentModel contains an unsupported field: ${page}`, "SCHEMA_REJECTED");
+    const output = {};
+    for (const field of fields) {
+      if (value[field] !== undefined && (typeof value[field] !== "string" || value[field].length > 2000 || /<\/?[a-z][^>]*>|javascript:/i.test(value[field]))) {
+        throw new PolicyError(`ContentModel field is invalid: ${page}.${field}`, "SCHEMA_REJECTED");
+      }
+      if (value[field] !== undefined) output[field] = value[field].trim();
+    }
+    if (!output.title || !output.heroTitle) throw new PolicyError(`ContentModel requires title and heroTitle: ${page}`, "NEEDS_INPUT");
+    if (!Array.isArray(value.claimRefs) || value.claimRefs.length === 0) throw new PolicyError(`ContentModel requires Claim references: ${page}`, "NEEDS_INPUT");
+    if (value.claimRefs.length > 10) throw new PolicyError(`ContentModel contains too many Claim references: ${page}`, "SCHEMA_REJECTED");
+    const refs = [...new Set(value.claimRefs)];
+    if (refs.some((ref) => typeof ref !== "string" || ref.length < 1 || ref.length > 200)) throw new PolicyError(`ContentModel Claim references are invalid: ${page}`, "SCHEMA_REJECTED");
+    if (refs.some((ref) => !claimAllowlist.has(ref))) throw new PolicyError(`ContentModel references an unapproved Claim: ${page}`, "POLICY_DENIED");
+    output.claimRefs = refs;
+    normalized[page] = output;
+  }
+  return normalized;
+}
+
 function delegationTool({ name, role, runContext, toolRuntime, handler }) {
   return createPiTool({ role, name, runContext, toolRuntime, handler });
 }
 
-export async function runCreationSupervisor({ run, runtime, store, registry, codeAtlas, toolRuntime, repository, expectedCommit, grant = { level: "L0" }, maxDelegations = 4 } = {}) {
+export async function runCreationSupervisor({ run, runtime, store, registry, codeAtlas, toolRuntime, repository, expectedCommit, grant = { level: "L0" }, maxDelegations = 4, contentCms = null } = {}) {
   if (!run?.id || !runtime || !store) throw new PolicyError("Supervisor requires a run, runtime and store", "CONFIG_REQUIRED");
   if (!(store instanceof SitePilotStore) && typeof store.recordArtifact !== "function") throw new PolicyError("Supervisor store does not support artifacts", "CONFIG_REQUIRED");
   toolRuntime = toolRuntime || createAgentToolRuntime(store);
   const canResearch = Boolean(codeAtlas && typeof codeAtlas.search === "function" && repository && /^[a-f0-9]{40}$/i.test(expectedCommit || ""));
-  const state = { strategy: null, research: null, questions: null, decision: null, decisions: [], delegations: 0, evidence: [] };
+  const contentOnly = contentCms?.contentOnly === true;
+  if (contentOnly && (!run.strategy || !run.research)) throw new PolicyError("ContentCMS requires the completed strategy and research stage", "PRECONDITION_REQUIRED");
+  const state = { strategy: contentOnly ? run.strategy : null, research: contentOnly ? run.research : null, content: null, questions: null, decision: null, decisions: contentOnly ? [...(run.agentState?.decisions || [])] : [], delegations: 0, evidence: [] };
   const inputSnapshotId = run.inputSnapshotId || `snapshot:${run.id}`;
   const baseContext = { runId: run.id, inputSnapshotId, grant, requestedScope: { repository: repository || null, expectedCommit: expectedCommit || null } };
-  const supervisorAgentRunId = roleRunId(run.id, "Supervisor", 1);
+  const priorSupervisorRuns = contentOnly ? (store.audit || []).filter((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "Supervisor").length : 0;
+  const supervisorAgentRunId = roleRunId(run.id, "Supervisor", priorSupervisorRuns + 1);
   const recordDecision = (action, input, outputRefs = []) => {
     if (typeof input.whyNow !== "string" || input.whyNow.length < 8 || typeof input.expectedObservation !== "string" || input.expectedObservation.length < 8 || !["low", "medium", "high"].includes(input.risk) || !Array.isArray(input.stopIf)) {
       throw new PolicyError("Supervisor action requires a structured decision record", "SCHEMA_REJECTED");
@@ -183,13 +247,86 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     runContext: { ...baseContext, agentRunId: supervisorAgentRunId },
     toolRuntime,
     handler: async (input) => {
-      const allowedFields = new Set(["audience", "primaryConversion", "brandConstraints", "contentAvailable", "locale", "codeAtlasSource"]);
+      const allowedFields = new Set(["audience", "primaryConversion", "brandConstraints", "contentAvailable", "locale", "codeAtlasSource", "productFacts", "brandName", "productProof", "seoDetails"]);
       if (input.questions.some((question) => !allowedFields.has(question.field))) throw new PolicyError("Supervisor requested an unsupported customer field", "SCHEMA_REJECTED");
       state.questions = input.questions;
       recordDecision("request_customer_input", input, run.artifactIds || []);
       return { status: "needs_input", questions: state.questions, terminate: true };
     },
   });
+
+  const delegateContentCMS = contentCms ? delegationTool({
+    name: "delegate_content_cms",
+    role: "Supervisor",
+    runContext: { ...baseContext, agentRunId: supervisorAgentRunId },
+    toolRuntime,
+    handler: async (input) => {
+      if (++state.delegations > maxDelegations) throw new PolicyError("Supervisor delegation budget exhausted", "BUDGET_EXHAUSTED");
+      if (!state.strategy || !state.research) throw new PolicyError("Architect and Research are required before ContentCMS", "PRECONDITION_REQUIRED");
+      if (!contentCms.designDraft || !contentCms.pagePlan || contentCms.candidateId !== contentCms.candidate?.id || contentCms.candidateHash !== contentCms.candidate?.candidateHash) throw new PolicyError("ContentCMS requires the current candidate, DesignDraft and PagePlan", "PRECONDITION_REQUIRED");
+      recordDecision("delegate_content_cms", input, run.artifactIds || []);
+      const priorContentRuns = (store.audit || []).filter((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "ContentCMS").length;
+      const childRunId = roleRunId(run.id, "ContentCMS", priorContentRuns + 1);
+      let submitted = null;
+      const childContext = { ...baseContext, agentRunId: childRunId };
+      const inspectSchema = createPiTool({
+        role: "ContentCMS",
+        name: "inspect_payload_schema",
+        runContext: { ...childContext, grant: { level: "L0" } },
+        toolRuntime,
+        handler: ({ collection }) => {
+          if (collection !== "pages") throw new PolicyError("ContentCMS may inspect only the approved pages collection", "POLICY_DENIED");
+          return { collection, schema: contentCms.payloadSchema || { collection: "pages", status: "sandbox_only", required: ["title", "hero", "claimRefs"] } };
+        },
+      });
+      const submitModel = createPiTool({
+        role: "ContentCMS",
+        name: "submit_content_model",
+        runContext: { ...childContext, grant: { level: "L0" } },
+        toolRuntime,
+        handler: (params) => {
+          const { contentByPage, status, questions } = params || {};
+          if (status === "needs_input") {
+            if (!Array.isArray(questions) || questions.length < 1 || questions.length > 3) throw new PolicyError("ContentCMS needs_input requires one to three customer questions", "SCHEMA_REJECTED");
+            const allowedFields = new Set(["audience", "primaryConversion", "brandConstraints", "contentAvailable", "locale", "codeAtlasSource", "productFacts", "brandName", "productProof", "seoDetails"]);
+            if (questions.some((item) => !item || !allowedFields.has(item.field) || typeof item.question !== "string" || item.question.length > 240)) throw new PolicyError("ContentCMS returned an unsupported customer question", "SCHEMA_REJECTED");
+            submitted = { status: "needs_input", questions, candidateId: contentCms.candidateId, candidateHash: contentCms.candidateHash, designDraftId: contentCms.designDraft.id, designHash: contentCms.designDraft.designHash, pagePlanHash: contentCms.pagePlan.sourceManifestHash || null };
+            return { accepted: true, contentModel: submitted, terminate: true };
+          }
+          const normalized = validateContentModel(contentByPage, { strategy: state.strategy, designDraft: contentCms.designDraft, pagePlan: contentCms.pagePlan, allowedClaimRefs: contentCms.allowedClaimRefs });
+          submitted = { contentByPage: normalized, candidateId: contentCms.candidateId, candidateHash: contentCms.candidateHash, designDraftId: contentCms.designDraft.id, designHash: contentCms.designDraft.designHash, pagePlanHash: contentCms.pagePlan.sourceManifestHash || null, status: "proposed" };
+          return { accepted: true, contentModel: submitted, terminate: true };
+        },
+      });
+      const result = await runtime.runRole({
+        role: "ContentCMS",
+        runId: run.id,
+        agentRunId: childRunId,
+        inputSnapshotId,
+        prompt: promptForContentCMS(run, state.strategy, state.research, contentCms),
+        grant: { level: "L0" },
+        artifactType: "ContentModel",
+        persistArtifact: false,
+        tools: [inspectSchema, submitModel],
+      });
+      const model = submitted || result.artifact?.output;
+      if (!model) throw new PolicyError("ContentCMS did not submit a ContentModel", "AGENT_OUTPUT_MISSING");
+      if (model.status === "needs_input") {
+        state.questions = model.questions;
+        run.contentModel = model;
+        const artifact = createArtifact({ type: "ContentModel", role: "ContentCMS", runId: run.id, inputRefs: [inputSnapshotId, "SiteStrategy", "ComponentPlan", contentCms.candidateId, contentCms.designDraft.id], output: model, status: "needs_input", risk: "medium" });
+        store.recordArtifact(run.id, artifact);
+        store.event(run.id, "agent.delegation.completed", { role: "ContentCMS", status: "needs_input", designDraftId: contentCms.designDraft.id });
+        return { status: "needs_input", questions: state.questions, terminate: true };
+      }
+      const normalized = validateContentModel(model.contentByPage, { strategy: state.strategy, designDraft: contentCms.designDraft, pagePlan: contentCms.pagePlan, allowedClaimRefs: contentCms.allowedClaimRefs });
+      state.content = { ...model, contentByPage: normalized, status: "proposed" };
+      run.contentModel = state.content;
+      store.recordArtifact(run.id, createArtifact({ type: "ContentModel", role: "ContentCMS", runId: run.id, inputRefs: [inputSnapshotId, "SiteStrategy", "ComponentPlan", contentCms.candidateId, contentCms.designDraft.id], output: state.content, status: "complete", risk: "medium" }));
+      store.event(run.id, "agent.delegation.completed", { role: "ContentCMS", status: "succeeded", designDraftId: contentCms.designDraft.id });
+      return { status: "content_proposed", contentModel: state.content };
+    },
+  }) : null;
 
   const completePlan = delegationTool({
     name: "complete_plan",
@@ -199,13 +336,16 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     handler: async (input) => {
       if (!state.strategy) throw new PolicyError("Supervisor cannot complete before Architect produces SiteStrategy", "PRECONDITION_REQUIRED");
       if (!state.research) throw new PolicyError("Supervisor cannot complete before Research produces ComponentPlan", "PRECONDITION_REQUIRED");
+      if (contentCms && !state.content) throw new PolicyError("Supervisor cannot complete before ContentCMS produces ContentModel", "PRECONDITION_REQUIRED");
       recordDecision("complete_plan", input, run.artifactIds || []);
       state.decision = { status: "complete", summary: input.summary };
       return { ...state.decision, terminate: true };
     },
   });
 
-  const supervisorTools = [delegateArchitect, ...(delegateResearch ? [delegateResearch] : []), requestInput, completePlan];
+  const supervisorTools = contentOnly
+    ? [...(delegateContentCMS ? [delegateContentCMS] : []), requestInput, completePlan]
+    : [delegateArchitect, ...(delegateResearch ? [delegateResearch] : []), ...(delegateContentCMS ? [delegateContentCMS] : []), requestInput, completePlan];
   const result = await runtime.runRole({
     role: "Supervisor",
     runId: run.id,
@@ -214,16 +354,14 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     grant,
     persistArtifact: false,
     prompt: JSON.stringify({
-      task: "Coordinate the first SitePilot creation slice.",
+      task: contentOnly ? "Coordinate the ContentCMS draft stage for the current candidate." : "Coordinate the first SitePilot creation slice.",
       goal: run.inputSnapshot.goal,
       currentArtifacts: [],
       availableDelegations: supervisorTools.map((tool) => tool.name),
       rules: [
-        "Delegate Architect before Research.",
-        "Ask the customer when a missing fact blocks a reliable strategy.",
-        "Research can only use the repository and full commit supplied by the server.",
-        "If a strategy exists, delegate research when the tool is available.",
-        "If Research is unavailable, ask for a CodeAtlas repository ID and full commit before completing.",
+        ...(contentOnly ? ["Do not rerun Architect or Research; their frozen artifacts are already available.", "Delegate ContentCMS for this candidate, or request customer input if evidence is insufficient."] : ["Delegate Architect before Research.", "Research can only use the repository and full commit supplied by the server.", "If a strategy exists, delegate research when the tool is available.", "If Research is unavailable, ask for a CodeAtlas repository ID and full commit before completing."]),
+        "Ask the customer when a missing fact blocks a reliable strategy or content model.",
+        ...(contentCms ? ["ContentCMS may submit only a validated proposed ContentModel; it must stop for missing customer facts or Claim references."] : []),
         "Do not claim completion until required artifacts are present.",
       ],
       defaults: { repository, expectedCommit },
@@ -231,8 +369,8 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     tools: supervisorTools,
   });
   const decision = result.output || state.decision || {};
-  const questions = state.questions || (!canResearch ? [{ field: "codeAtlasSource", question: "请选择授权的 CodeAtlas 仓库并提供固定的 40 位 commit SHA。", reason: "Research 必须绑定允许列表中的固定代码版本。" }] : []);
-  const status = questions.length ? "needs_input" : state.strategy && state.research ? "ready_for_design" : "needs_input";
+  const questions = state.questions || (!contentOnly && !canResearch ? [{ field: "codeAtlasSource", question: "请选择授权的 CodeAtlas 仓库并提供固定的 40 位 commit SHA。", reason: "Research 必须绑定允许列表中的固定代码版本。" }] : []);
+  const status = questions.length ? "needs_input" : state.content ? "content_review_required" : contentOnly ? "content_incomplete" : state.strategy && state.research ? (contentCms ? "ready_for_content" : "ready_for_design") : "needs_input";
   run.agentState = {
     status,
     questions: state.questions || decision.questions || questions,
@@ -240,10 +378,10 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     artifactIds: (run.artifactIds || []).slice(),
     lastDecision: decision,
   };
-  run.checkpoint = status === "needs_input" ? "agent_needs_input" : "agent_strategy_research_ready";
+  run.checkpoint = status === "needs_input" ? "agent_needs_input" : state.content ? "content_review_required" : contentOnly ? "content_agent_incomplete" : "agent_strategy_research_ready";
   store.event(run.id, "supervisor.completed", { status, artifactCount: run.artifactIds?.length || 0, delegations: state.delegations });
   store.persist?.();
-  return { status, decision, strategy: state.strategy, research: state.research, questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
+  return { status, decision, strategy: state.strategy, research: state.research, contentModel: state.content, questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
 }
 
 export function createAgentToolRuntime(store, journal = null) {

@@ -12,7 +12,7 @@
 
 SitePilot uses Pi as its agent-loop foundation, not the Pi coding-agent CLI as the product. The pinned `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai` packages now power the first model-directed workflow: `Supervisor → Architect → Research → Supervisor`. Studio model settings are adapted in memory; each role receives only its allowlisted SitePilot tools, and outputs are stored as typed artifacts.
 
-This is an implemented first slice, not a complete multi-agent delivery system. ContentCMS, Coding, QA and Review remain policy definitions and existing guarded adapters; the Pi Supervisor does not yet dispatch those roles. Automated workflow tests use Pi's faux provider. A successful live-provider multi-role run has not yet been recorded.
+The Supervisor now also dispatches a bounded ContentCMS drafting stage after strategy, research, PagePlan, DesignDraft, and a successful candidate build exist. ContentCMS reads only the `pages` schema and returns a proposed ContentModel bound to candidate/design/page-plan hashes; server validation limits pages and fields and checks Claim IDs against active client evidence. Missing facts stop for customer input. This stage runs at L0 and does not expose the L1 Payload writer; a Studio review step precedes the separate sandbox-draft action. Coding, QA and Review are still not dispatched by Pi. Automated workflow tests use Pi's faux provider. A successful live-provider multi-role run has not yet been recorded.
 
 Adopted principles:
 
@@ -33,7 +33,7 @@ SitePilot-specific boundaries remain authoritative:
 
 1. Done: pinned the Pi dependencies and adapted Studio's selected provider/model into Pi's model APIs for Chat Completions and Responses mode.
 2. Done for the first slice: role tools call through SitePilot's `ToolRuntime`; the Supervisor runs at L0, CodeAtlas is bound to an allowlisted repository and fixed commit, and generic filesystem/shell tools remain unavailable.
-3. In progress: expand dispatch after the creation slice proves reliable. Next connect ContentCMS and Coding only through the existing Payload sandbox and scoped project worktree; then attach independent QA and Review agents.
+3. In progress: harden the ContentCMS draft-to-review-to-Payload transition, including server-verifiable human confirmation, then connect Coding only through the scoped project worktree; attach independent QA and Review afterward.
 4. Deferred: use Pi durable tasks only after its experimental API passes compatibility and upgrade review. SitePilot's store and replay policy remain authoritative.
 5. Current tests cover missing CodeAtlas input, role-tool rejection and a successful Supervisor→Architect→Research workflow with the faux provider. Add incompatible-source, model-failure, restart/recovery and live-provider evidence before enabling write-capable roles.
 

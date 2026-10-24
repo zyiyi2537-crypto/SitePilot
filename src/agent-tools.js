@@ -13,8 +13,10 @@ const descriptions = {
   retrieve_codeatlas: "Search only the server-approved CodeAtlas repository at its frozen full commit.",
   submit_site_strategy: "Submit a validated SiteStrategy artifact for this run.",
   submit_component_plan: "Submit component recommendations that cite evidence retrieved during this task.",
+  submit_content_model: "Submit proposed page content with valid project Claim references; missing facts must stop the workflow.",
   delegate_architect: "Ask the Architect child agent to create a strategy artifact.",
   delegate_research: "Ask the Research child agent to inspect the supplied repository and commit.",
+  delegate_content_cms: "Ask the ContentCMS child agent to validate a bounded content model for the current design.",
   request_customer_input: "Pause the run and return up to three questions that need customer input.",
   complete_plan: "Finish the current planning stage after required artifacts are available.",
   inspect_payload_schema: "Read the allowlisted Payload schema without changing CMS data.",
@@ -29,6 +31,7 @@ const SAFE_TOOL_NAMES = new Set([
   "inspect_payload_schema",
   "submit_site_strategy",
   "submit_component_plan",
+  "submit_content_model",
   "delegate_architect",
   "delegate_research",
   "request_customer_input",
@@ -97,6 +100,7 @@ const schemas = {
     repository: Type.String({ minLength: 1, maxLength: 200 }),
     expectedCommit: Type.String({ minLength: 40, maxLength: 40 }),
   }),
+  delegate_content_cms: Type.Object(decisionFields()),
   request_customer_input: Type.Object({
     ...decisionFields(),
     questions: Type.Array(Type.Object({
@@ -104,6 +108,16 @@ const schemas = {
       question: Type.String({ minLength: 1, maxLength: 240 }),
       reason: Type.Optional(Type.String({ maxLength: 300 })),
     }), { minItems: 1, maxItems: 3 }),
+  }),
+  submit_content_model: Type.Object({
+    ...decisionFields(),
+    status: Type.Union([Type.Literal("proposed"), Type.Literal("needs_input")]),
+    contentByPage: Type.Optional(Type.Unknown()),
+    questions: Type.Optional(Type.Array(Type.Object({
+      field: Type.String({ minLength: 1, maxLength: 64 }),
+      question: Type.String({ minLength: 1, maxLength: 240 }),
+      reason: Type.Optional(Type.String({ maxLength: 300 })),
+    }), { maxItems: 3 })),
   }),
   complete_plan: Type.Object({
     ...decisionFields(),
