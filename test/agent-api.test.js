@@ -382,6 +382,105 @@ test("Review changes_requested creates bounded repair candidates and stops after
   assert.equal(run.reviewCycle.status, "human_required");
 });
 
+test("Repair phase delegates Review findings to read-only Coding", async (t) => {
+  const worktreeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sitepilot-repair-agent-api-"));
+  t.after(() => fs.rm(worktreeRoot, { recursive: true, force: true }));
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Repair a reviewed website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { strategy: "content-conversion", pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.research = { repository: "approved/repo", commit: "a".repeat(40), componentPlan: { decisions: [] }, evidence: [] };
+  run.pagePlan = { sourceManifestHash: "page-plan-hash", routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "approved/repo", commit: "a".repeat(40), path: "src/Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const workspace = path.join(worktreeRoot, run.id, design.id);
+  const sourcePath = "src/app/home.tsx";
+  const sourceContent = "export default function Page() { return <main data-sitepilot-page=\"home\">Needs repair</main>; }\n";
+  const manifestPath = "src/generated/sitepilot-manifest.json";
+  const routes = [{ page: "home", route: "/", file: sourcePath }];
+  const manifest = { routes, sourceManifestHash: hash(routes), design: { designHash: design.designHash } };
+  await fs.mkdir(path.dirname(path.join(workspace, sourcePath)), { recursive: true });
+  await fs.mkdir(path.dirname(path.join(workspace, manifestPath)), { recursive: true });
+  await fs.writeFile(path.join(workspace, sourcePath), sourceContent);
+  await fs.writeFile(path.join(workspace, manifestPath), `${JSON.stringify(manifest)}\n`);
+  const sourceManifest = [
+    { path: sourcePath, size: Buffer.byteLength(sourceContent), sha256: crypto.createHash("sha256").update(sourceContent).digest("hex") },
+    { path: manifestPath, size: Buffer.byteLength(`${JSON.stringify(manifest)}\n`), sha256: crypto.createHash("sha256").update(`${JSON.stringify(manifest)}\n`).digest("hex") },
+  ].sort((left, right) => left.path.localeCompare(right.path));
+  const expectedHead = hash(sourceManifest);
+  const candidate = store.createCandidate(run.id, {
+    designDraftId: design.id,
+    build: { passed: true },
+    codeArtifact: { workspace, files: [sourcePath, manifestPath], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash },
+  });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa_repair_agent", results: [{ check: "links", passed: true }] });
+  const decision = {
+    status: "changes_requested",
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    qualityReportHash: candidate.quality.reportHash,
+    whyNow: "Review 发现首页源码问题",
+    expectedObservation: "修复补丁覆盖所有发现项",
+    stopIf: ["源码 head 发生变化"],
+    risk: "medium",
+    summary: "修复首页标记",
+    findings: [{ severity: "high", path: sourcePath, message: "首页标记需要修复", evidence: "Review source" }],
+    questions: [],
+  };
+  const decisionHash = hash(decision);
+  candidate.independentReview = { ...decision, decisionHash };
+  run.reviewCycle = { repairRound: 0, round: 0, maxRounds: 3, parentCandidateId: candidate.id, parentCandidateHash: candidate.candidateHash, reviewDecisionHash: decisionHash, status: "awaiting_repair" };
+  const faux = fauxProvider({ models: [{ id: "test-model" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_coding", { whyNow: "Review 已要求源码返修", expectedObservation: "得到绑定 finding 的补丁", stopIf: ["候选版本变化"], risk: "medium" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("inspect_source_package", { sourceId: `candidate:${candidate.id}`, paths: [sourcePath] }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("submit_code_patch_plan", {
+      whyNow: "修复 Review 指出的首页问题",
+      expectedObservation: "每个 finding 都有明确的源码修改",
+      stopIf: ["ReviewDecision hash 变化"],
+      risk: "medium",
+      status: "proposed",
+      candidateId: candidate.id,
+      candidateHash: candidate.candidateHash,
+      designDraftId: design.id,
+      designHash: design.designHash,
+      pagePlanHash: run.pagePlan.sourceManifestHash,
+      contentHash: null,
+      expectedHead,
+      reviewDecisionHash: decisionHash,
+      files: [{ path: sourcePath, operation: "modify", summary: "修复首页标记", sourceRefs: [], findingIndexes: [0], diff: `--- a/${sourcePath}\n+++ b/${sourcePath}\n@@ -1,1 +1,1 @@\n-${sourceContent.slice(0, -1)}\n+export default function Page() { return <main data-sitepilot-page=\"home\">Repaired</main>; }\n` }],
+      expectedTests: ["npm test"],
+      risks: [],
+    }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { whyNow: "补丁已结构化", expectedObservation: "L2 执行前由 Reviewer 再确认", stopIf: ["补丁 hash 变化"], risk: "medium", summary: "Repair CodePatch ready" }), { stopReason: "toolUse" }),
+  ]);
+  const server = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer" },
+    undefined,
+    undefined,
+    null,
+    null,
+    null,
+    { worktreeRoot },
+    undefined,
+    null,
+    null,
+    (config) => ({ endpoint: config.baseUrl, modelVersion: config.model, apiMode: config.apiMode, testConnection: async () => ({}) }),
+    () => ({ model: faux.getModel(), streamFn: (model, context, options) => models.streamSimple(model, context, options) }),
+  );
+  assert.equal((await request(server, "POST", "/model/config", apiToken, { baseUrl: "https://model.example/v1", model: "test-model", apiMode: "chat_completions", apiKey: "test-secret" })).status, 200);
+  const result = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "repair", candidateId: candidate.id });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "repair_patch_ready", JSON.stringify(result.body));
+  assert.equal(result.body.codePatch.reviewDecisionHash, decisionHash);
+  assert.equal(result.body.codePatch.files[0].findingIndexes[0], 0);
+  assert.equal(result.body.repairPatch.reviewDecisionHash, decisionHash);
+  assert.equal(run.repairPatch.codePatchHash, result.body.repairPatch.codePatchHash);
+  assert.equal(await fs.readFile(path.join(workspace, sourcePath), "utf8"), sourceContent);
+});
+
 test("ContentCMS drafting stays below the Payload write grant", () => {
   assert.throws(() => createPiTool({
     role: "ContentCMS",

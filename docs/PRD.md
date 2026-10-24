@@ -398,7 +398,7 @@ Architect 必须先输出可审阅的 SiteStrategy，再允许 Coding 开工。S
 
 工业设备站优先产品参数、应用场景、技术询盘与双语准确性；SaaS 站优先功能理解、定价证据、试用转化与帮助文档；消费活动站优先素材许可、活动时间、商品呈现与移动端转化。策略差异必须反映在页面树、组件选择、CMS schema、代码差异和 QA 检查集，而不只是标题或主题色。QA 检查完成后，Orchestrator 可针对失败调整实现计划，但不能自行更改已经批准的客户事实或业务目标。
 
-多代理基础采用固定版本的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前实现了 Supervisor→Architect→Research、ContentCMS、Coding 提案和独立 Review 阶段；Review `changes_requested` 可由 Reviewer 提交绑定发现项的补丁，再经单次 L2 授权在隔离 worktree 生成 child CandidateRevision。每个 child 都必须重新 QA 和 Review，最多三轮返修，之后转人工。返修生成阶段当前只做 manifest/页面文件结构校验，不代表真实 Payload 构建；Pi Supervisor 尚未自动委派返修 Coding。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
+多代理基础采用固定版本的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前实现了 Supervisor→Architect→Research、ContentCMS、Coding 提案和独立 Review 阶段；Review `changes_requested` 后可通过 `phase: repair` 重新委派只读 Coding。Coding 必须绑定原候选、源码 head、ReviewDecision hash，并为每个 finding 提供 findingIndexes；服务端把 CodePatch 转为受限 repair manifest，Reviewer 仍需单次 L2 grant 才能执行。执行会生成全新的 child CandidateRevision，不继承旧 QA、Review、ContentModel、Content approval 或 CMS snapshot；每个 child 都必须重新生成/审批内容、重新 QA 和 Review，最多三轮返修，之后转人工。返修生成阶段当前只做 manifest/页面文件结构校验，不代表真实 Payload 构建。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
 
 自然语言到设计草稿的第一版实现不引入通用拖拽建站器。Puck 只作为受限画布依赖候选：SitePilot 自己定义组件白名单、props schema、设计 token、响应式规则和序列化版本；画布的保存、差异、权限、审计和候选版本仍由 SitePilot 管理。若 Puck 与当前 Payload 区块无法保持同一渲染结果，优先缩小画布能力而不是维护第二套渲染实现。
 

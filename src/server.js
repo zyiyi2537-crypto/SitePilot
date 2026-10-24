@@ -414,7 +414,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
         let contentCms = null;
         let review = null;
-        if (input.phase !== undefined && !["content", "coding", "review"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
+        if (input.phase !== undefined && !["content", "coding", "repair", "review"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
         if (input.phase === "content") {
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
@@ -490,6 +490,55 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             fileCount: source.sourceFiles.length,
           };
         }
+        let repair = null;
+        if (input.phase === "repair") {
+          if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
+          const candidate = store.candidates.get(input.candidateId);
+          if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+          if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          const cycle = run.reviewCycle;
+          if (!cycle || cycle.status !== "awaiting_repair" || cycle.parentCandidateId !== candidate.id) return send(res, 422, { code: "REPAIR_NOT_READY" });
+          const decision = candidate.independentReview;
+          if (!decision || decision.status !== "changes_requested" || decision.candidateId !== candidate.id || decision.candidateHash !== candidate.candidateHash) return send(res, 422, { code: "REVIEW_CHANGES_REQUIRED" });
+          const { decisionHash: storedDecisionHash, ...decisionContent } = decision;
+          const expectedDecisionHash = cycle.reviewDecisionHash || storedDecisionHash || reviewDecisionHash(decisionContent);
+          if (expectedDecisionHash !== reviewDecisionHash(decisionContent)) return send(res, 409, { code: "REVIEW_DECISION_CHANGED" });
+          if (cycle.reviewDecisionHash && cycle.reviewDecisionHash !== expectedDecisionHash) return send(res, 409, { code: "STALE_REVISION" });
+          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+          if (!run.strategy || !run.research || !run.pagePlan) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
+          const designDraft = store.designs.get(candidate.designDraftId);
+          if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+          if (!Array.isArray(candidate.codeArtifact?.files) || !candidate.codeArtifact.files.length) return send(res, 422, { code: "SOURCE_PACKAGE_REQUIRED" });
+          const source = await inspectCandidateSource(run, candidate);
+          repair = {
+            repairOnly: true,
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            candidate,
+            designDraft,
+            designDraftId: designDraft.id,
+            designHash: designDraft.designHash,
+            pagePlanHash: run.pagePlan.sourceManifestHash || null,
+            contentModel: candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null),
+            repairDecision: decisionContent,
+            repairDecisionHash: expectedDecisionHash,
+            reviewDecisionHash: expectedDecisionHash,
+            expectedHead: source.expectedHead,
+            sourceId: `candidate:${candidate.id}`,
+            sourceFiles: source.sourceFiles,
+            sourceManifest: source.sourceManifest,
+            assertCurrent: async () => {
+              const currentHead = await source.assertCurrent();
+              const currentCandidate = store.candidates.get(candidate.id);
+              if (!currentCandidate || currentCandidate.candidateHash !== candidate.candidateHash || latestCandidate(run)?.id !== candidate.id || run.reviewCycle?.reviewDecisionHash !== expectedDecisionHash) throw new PolicyError("Candidate or ReviewDecision changed during repair Coding", "STALE_REVISION");
+              return currentHead;
+            },
+            readFiles: source.readFiles,
+            sourceRefs: Array.isArray(candidate.sourceRefs) ? candidate.sourceRefs.map((item) => typeof item === "string" ? item : ({ evidenceId: item?.evidenceId || item?.id || null, repository: item?.repository || null, commit: item?.commit || null, path: item?.path || null, licenseReference: item?.licenseReference || null })).filter((item) => typeof item === "string" || item.evidenceId) : [],
+            fileCount: source.sourceFiles.length,
+          };
+        }
         if (input.phase === "review") {
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
@@ -523,7 +572,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         try {
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
-          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding, review });
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding: coding || repair, review });
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
           const returnedContentModel = result.contentModel || (contentCms?.candidate ? run.contentModel : null);
           if (returnedContentModel) {
@@ -533,6 +582,27 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             run.contentModel = model;
             if (contentCms?.candidate) contentCms.candidate.contentModel = model;
             result.contentModel = model;
+          }
+          if (repair && result.codePatch?.status === "proposed") {
+            const generatedRepair = normalizeRepairPatch({
+              whyNow: result.codePatch.whyNow,
+              expectedObservation: result.codePatch.expectedObservation,
+              stopIf: result.codePatch.stopIf,
+              risk: result.codePatch.risk,
+              status: result.codePatch.status,
+              candidateId: result.codePatch.candidateId,
+              candidateHash: result.codePatch.candidateHash,
+              expectedHead: result.codePatch.expectedHead,
+              reviewDecisionHash: repair.reviewDecisionHash,
+              files: result.codePatch.files.map((file) => ({ path: file.path, operation: file.operation, summary: file.summary, diff: file.diff, findingIndexes: file.findingIndexes })),
+              expectedTests: result.codePatch.expectedTests,
+              risks: result.codePatch.risks,
+            }, { candidate: repair.candidate, source: { expectedHead: repair.expectedHead, sourceFiles: repair.sourceFiles }, reviewDecision: repair.repairDecision, expectedReviewHash: repair.reviewDecisionHash });
+            if (run.repairPatch && run.repairPatch.codePatchHash !== generatedRepair.codePatchHash) throw new PolicyError("A different repair patch is already proposed", "REPAIR_PATCH_ALREADY_PROPOSED");
+            run.repairPatch = Object.freeze(generatedRepair);
+            run.checkpoint = "repair_ready_for_execution";
+            store.event(run.id, "coding.repair_patch.proposed", { candidateId: repair.candidateId, candidateHash: repair.candidateHash, reviewDecisionHash: repair.reviewDecisionHash, patchHash: generatedRepair.codePatchHash });
+            result.repairPatch = generatedRepair;
           }
           store.persist?.();
           return send(res, 200, result);

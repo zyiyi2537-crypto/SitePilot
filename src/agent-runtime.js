@@ -121,7 +121,7 @@ export class SitePilotAgentRuntime {
       },
       afterToolCall: async ({ toolCall, isError, result }) => {
         if (result?.terminate) finishRequested = true;
-        this.emit({ type: "agent.tool.completed", runId, agentRunId, role, tool: toolCall.name, isError, at: new Date().toISOString() });
+        this.emit({ type: "agent.tool.completed", runId, agentRunId, role, tool: toolCall.name, isError, ...(isError ? { error: result?.details || result?.structuredContent || result?.content?.[0]?.text || "tool failed" } : {}), at: new Date().toISOString() });
         return undefined;
       },
       finishTurn: () => {
