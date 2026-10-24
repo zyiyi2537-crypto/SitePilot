@@ -25,6 +25,7 @@ import { createIntakeAdapterFromEnvironment, createOpenAICompatibleIntakeAdapter
 import { createPiModelRuntime, SitePilotAgentRuntime } from "./agent-runtime.js";
 import { createAgentToolRuntime, runCreationSupervisor } from "./agent-supervisor.js";
 import { JsonToolJournal, resolveToolJournalPath } from "./tool-runtime.js";
+import { applyUnifiedDiff } from "./code-patch.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -86,6 +87,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   let activeModelConfig = environmentModelConfig;
   let activeModelSecret = process.env.SITEPILOT_MODEL_API_KEY || null;
   const generatingRuns = new Set();
+  const executingCodePatches = new Set();
   const runningAgentRuns = new Set();
   const previewSessions = new Map();
   const intakePreviews = new Map();
@@ -114,6 +116,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
   const generationWorkspace = (run, designId) => path.resolve(generation.worktreeRoot, run.id, run.candidateIds?.length ? designId : "");
+  const codePatchWorkspace = (run, candidate, patch) => {
+    if (!generation?.worktreeRoot) throw new PolicyError("Candidate patch execution is not configured", "GENERATION_NOT_CONFIGURED");
+    const root = path.resolve(generation.worktreeRoot);
+    const target = path.resolve(root, run.id, `patch-${candidate.id}-${patch.codePatchHash.slice(0, 16)}`);
+    if (!target.startsWith(`${root}${path.sep}`)) throw new PolicyError("CodePatch worktree escapes configured root", "POLICY_DENIED");
+    return target;
+  };
   const inspectCandidateSource = async (run, candidate) => {
     if (!generation?.worktreeRoot || !path.isAbsolute(generation.worktreeRoot)) throw new PolicyError("Candidate source inspection is not configured", "GENERATION_NOT_CONFIGURED");
     const declaredFiles = candidate.codeArtifact?.files;
@@ -192,6 +201,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
       const contentApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/content-approval$/);
       const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
+      const codePatchExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-execution$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
@@ -201,9 +211,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const candidatePreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/preview$/);
       const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
-      if (generateMatch && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      if ((generateMatch || codePatchExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
+      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -569,6 +579,17 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!payloadBuild || !run.payloadWorktree) return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
           resource = path.resolve(payloadBuild.worktreeRoot, run.payloadWorktree.repositoryPathRef);
           planHash = PINNED_SOURCES.payloadWebsite.commit;
+        } else if (tool === "apply_code_patch") {
+          if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+          const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
+          if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          const patch = run.codingPatch;
+          const approval = run.codePatchApproval;
+          if (!patch || patch.status !== "proposed" || !approval || approval.codePatchHash !== patch.codePatchHash || approval.executionGranted !== false) return send(res, 422, { code: "CODE_PATCH_APPROVAL_REQUIRED" });
+          const source = await inspectCandidateSource(run, candidate);
+          if (source.expectedHead !== patch.expectedHead) return send(res, 409, { code: "STALE_SOURCE_REVISION" });
+          resource = codePatchWorkspace(run, candidate, patch);
+          planHash = patch.codePatchHash;
         } else return send(res, 422, { code: "TOOL_NOT_APPROVED" });
         const grant = grants.issue({ projectId: run.projectId, runId: run.id, tool, resource, planHash, expiresAt: input.expiresAt, issuedBy: reviewerId });
         store.event(run.id, "grant.issued", { grantId: grant.id, tool: grant.tool, resource: grant.resource });
@@ -715,6 +736,77 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.persist?.();
         return send(res, 201, { candidate, generated, build });
         } finally { generatingRuns.delete(run.id); }
+      }
+      if (req.method === "POST" && codePatchExecutionMatch) {
+        if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(codePatchExecutionMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        const patch = run.codingPatch;
+        const approval = run.codePatchApproval;
+        const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        if (!patch || patch.status !== "proposed" || !approval || approval.codePatchHash !== patch.codePatchHash || approval.executionGranted !== false) return send(res, 422, { code: "CODE_PATCH_APPROVAL_REQUIRED" });
+        if (patch.candidateId !== candidate.id || patch.candidateHash !== candidate.candidateHash || patch.designDraftId !== design?.id || patch.designHash !== design?.designHash || patch.pagePlanHash !== run.pagePlan?.sourceManifestHash) return send(res, 409, { code: "STALE_REVISION" });
+        if (codePatchHash(patch) !== patch.codePatchHash) return send(res, 409, { code: "CODE_PATCH_CHANGED" });
+        const target = codePatchWorkspace(run, candidate, patch);
+        const input = await readJson(req);
+        if (run.codePatchExecution?.codePatchHash === patch.codePatchHash && run.codePatchExecution.candidateId === candidate.id) {
+          const existing = store.candidates.get(run.codePatchExecution.childCandidateId);
+          if (existing) return send(res, 200, { candidate: existing, execution: run.codePatchExecution });
+        }
+        const source = await inspectCandidateSource(run, candidate);
+        if (source.expectedHead !== patch.expectedHead) return send(res, 409, { code: "STALE_SOURCE_REVISION" });
+        const executionKey = `${candidate.id}:${patch.codePatchHash}`;
+        if (executingCodePatches.has(executionKey)) return send(res, 409, { code: "CODE_PATCH_EXECUTION_IN_PROGRESS" });
+        executingCodePatches.add(executionKey);
+        let targetCreated = false;
+        try {
+          grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "apply_code_patch", resource: target, planHash: patch.codePatchHash });
+          const patchByPath = new Map((patch.files || []).map((file) => [file.path, file]));
+          const outputManifest = [];
+          await fs.mkdir(target, { recursive: false });
+          targetCreated = true;
+          for (const entry of source.sourceManifest) {
+            const sourcePath = path.resolve(generation.worktreeRoot, run.id, candidate.designDraftId, entry.path);
+            const actualSource = await fs.realpath(sourcePath);
+            const sourceRoot = await fs.realpath(path.resolve(generation.worktreeRoot, run.id, candidate.designDraftId));
+            if (!actualSource.startsWith(`${sourceRoot}${path.sep}`)) throw new PolicyError("Candidate source resolves outside its worktree", "POLICY_DENIED");
+            const original = (await fs.readFile(actualSource)).toString("utf8");
+            const filePlan = patchByPath.get(entry.path);
+            const content = filePlan ? applyUnifiedDiff(original, filePlan.diff, entry.path) : original;
+            const targetPath = path.resolve(target, entry.path);
+            if (!targetPath.startsWith(`${target}${path.sep}`)) throw new PolicyError("CodePatch target escapes its worktree", "POLICY_DENIED");
+            await fs.mkdir(path.dirname(targetPath), { recursive: true });
+            await fs.writeFile(targetPath, content, "utf8");
+            outputManifest.push({ path: entry.path, size: Buffer.byteLength(content), sha256: crypto.createHash("sha256").update(content).digest("hex") });
+          }
+          const newHead = crypto.createHash("sha256").update(JSON.stringify(outputManifest.sort((left, right) => left.path.localeCompare(right.path)))).digest("hex");
+          const build = await validateGeneratedCandidate({ worktreeRoot: target, expectedDesignHash: design?.designHash || undefined });
+          const child = store.createCandidate(run.id, { parentId: candidate.id, designDraftId: candidate.designDraftId, codeArtifact: { ...candidate.codeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, designDraftId: candidate.designDraftId, designHash: design?.designHash || null }, build: { ...build, mode: "static-rebuild", passed: true }, sourceRefs: candidate.sourceRefs });
+          candidate.status = "superseded";
+          const oldContent = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
+          if (oldContent) {
+            const contentModel = { ...oldContent, candidateId: child.id, candidateHash: child.candidateHash };
+            contentModel.contentHash = contentModelHash(contentModel);
+            child.contentModel = contentModel;
+            run.contentModel = contentModel;
+          }
+          const execution = Object.freeze({ candidateId: candidate.id, childCandidateId: child.id, candidateHash: candidate.candidateHash, patchHash: patch.codePatchHash, sourceHead: patch.expectedHead, newHead, executedBy: reviewerId, executedAt: new Date().toISOString(), buildPassed: true });
+          run.codePatchExecution = execution;
+          run.checkpoint = child.contentModel ? "content_review_required" : "candidate_ready";
+          store.event(run.id, "code-patch.executed", execution);
+          store.event(run.id, "candidate.code-revision.created", { parentCandidateId: candidate.id, candidateId: child.id, patchHash: patch.codePatchHash, newHead });
+          store.persist?.();
+          return send(res, 201, { candidate: child, execution, build });
+        } catch (error) {
+          if (targetCreated) await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+          store.event(run.id, "code-patch.execution.failed", { candidateId: candidate.id, patchHash: patch.codePatchHash, code: error.code || "BUILD_FAILED", reason: error.message });
+          store.persist?.();
+          throw error;
+        } finally {
+          executingCodePatches.delete(executionKey);
+        }
       }
       const candidateRunMatch = url.pathname.match(/^\/runs\/([^/]+)\/candidates$/);
       if (req.method === "POST" && candidateRunMatch) {

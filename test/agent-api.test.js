@@ -262,15 +262,23 @@ test("Coding proposes a read-only CodePatch bound to the approved candidate and 
   const design = store.createDesignDraft(run.id);
   const workspace = path.join(worktreeRoot, run.id, design.id);
   const sourcePath = "src/app/home.tsx";
-  const sourceContent = "export default function Page() { return <main>Existing page</main>; }\n";
+  const sourceContent = "export default function Page() { return <main data-sitepilot-page=\"home\">Existing page</main>; }\n";
+  const manifestPath = "src/generated/sitepilot-manifest.json";
+  const manifestRoutes = [{ page: "home", route: "/", file: sourcePath }];
+  const manifest = { routes: manifestRoutes, sourceManifestHash: hash(manifestRoutes), design: { designHash: design.designHash } };
   await fs.mkdir(path.dirname(path.join(workspace, sourcePath)), { recursive: true });
+  await fs.mkdir(path.dirname(path.join(workspace, manifestPath)), { recursive: true });
   await fs.writeFile(path.join(workspace, sourcePath), sourceContent);
-  const sourceManifest = [{ path: sourcePath, size: Buffer.byteLength(sourceContent), sha256: crypto.createHash("sha256").update(sourceContent).digest("hex") }];
+  await fs.writeFile(path.join(workspace, manifestPath), `${JSON.stringify(manifest)}\n`);
+  const sourceManifest = [
+    { path: sourcePath, size: Buffer.byteLength(sourceContent), sha256: crypto.createHash("sha256").update(sourceContent).digest("hex") },
+    { path: manifestPath, size: Buffer.byteLength(`${JSON.stringify(manifest)}\n`), sha256: crypto.createHash("sha256").update(`${JSON.stringify(manifest)}\n`).digest("hex") },
+  ].sort((left, right) => left.path.localeCompare(right.path));
   const expectedHead = hash(sourceManifest);
   const candidate = store.createCandidate(run.id, {
     designDraftId: design.id,
     build: { passed: true },
-    codeArtifact: { workspace, files: [sourcePath], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash },
+    codeArtifact: { workspace, files: [sourcePath, manifestPath], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash },
     sourceRefs: [{ evidenceId: "evidence_hero", repository: "approved/repo", commit: "a".repeat(40), path: "src/Hero.tsx" }],
   });
   const contentModel = {
@@ -312,7 +320,7 @@ test("Coding proposes a read-only CodePatch bound to the approved candidate and 
       pagePlanHash: run.pagePlan.sourceManifestHash,
       contentHash: contentModel.contentHash,
       expectedHead,
-      files: [{ path: "../../.env", operation: "modify", summary: "Attempt forbidden edit", sourceRefs: ["evidence_hero"] }],
+      files: [{ path: "../../.env", operation: "modify", summary: "Attempt forbidden edit", sourceRefs: ["evidence_hero"], diff: "invalid" }],
       expectedTests: ["npm test"],
       risks: [],
     }), { stopReason: "toolUse" }),
@@ -329,7 +337,7 @@ test("Coding proposes a read-only CodePatch bound to the approved candidate and 
       pagePlanHash: run.pagePlan.sourceManifestHash,
       contentHash: contentModel.contentHash,
       expectedHead,
-      files: [{ path: sourcePath, operation: "modify", summary: "Adapt the hero layout to the approved direction", sourceRefs: ["evidence_hero"] }],
+      files: [{ path: sourcePath, operation: "modify", summary: "Adapt the hero layout to the approved direction", sourceRefs: ["evidence_hero"], diff: `--- a/${sourcePath}\n+++ b/${sourcePath}\n@@ -1,1 +1,1 @@\n-${sourceContent.slice(0, -1)}\n+export default function Page() { return <main data-sitepilot-page=\"home\">Updated page</main>; }\n` }],
       expectedTests: ["npm test"],
       risks: ["Visual regression must be checked in preview"],
     }), { stopReason: "toolUse" }),
@@ -395,4 +403,32 @@ test("Coding proposes a read-only CodePatch bound to the approved candidate and 
   assert.equal(repeatedApproval.status, 200);
   assert.equal(repeatedApproval.body.codePatchHash, patchHash);
   assert.equal(store.audit.filter((event) => event.type === "code-patch.approved").length, 1);
+
+  const l2Token = "c".repeat(32);
+  const executionServer = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer", l2Token },
+    undefined,
+    undefined,
+    null,
+    null,
+    null,
+    { worktreeRoot },
+  );
+  const grant = await request(executionServer, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "apply_code_patch", candidateId: candidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(grant.status, 201);
+  const unauthorizedExecution = await request(executionServer, "POST", `/candidates/${candidate.id}/code-patch-execution`, apiToken, { grantId: grant.body.id });
+  assert.equal(unauthorizedExecution.status, 401);
+  const executed = await request(executionServer, "POST", `/candidates/${candidate.id}/code-patch-execution`, l2Token, { grantId: grant.body.id });
+  assert.equal(executed.status, 201);
+  assert.notEqual(executed.body.candidate.id, candidate.id);
+  assert.equal(executed.body.candidate.parentId, candidate.id);
+  assert.equal(executed.body.candidate.build.passed, true);
+  assert.equal(executed.body.candidate.contentModel.contentHash.length, 64);
+  assert.equal(executed.body.execution.patchHash, patchHash);
+  assert.equal(candidate.status, "superseded");
+  assert.equal(run.checkpoint, "content_review_required");
+  assert.equal(await fs.readFile(path.join(workspace, sourcePath), "utf8"), sourceContent);
+  assert.equal(await fs.readFile(path.join(executed.body.candidate.codeArtifact.workspace, sourcePath), "utf8"), "export default function Page() { return <main data-sitepilot-page=\"home\">Updated page</main>; }\n");
+  assert.equal(store.audit.some((event) => event.type === "code-patch.executed"), true);
 });

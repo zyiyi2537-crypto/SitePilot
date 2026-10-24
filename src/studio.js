@@ -196,6 +196,7 @@ function renderDelivery(result) {
   const codePatchApproved = Boolean(codePatch && currentRun?.codePatchApproval?.codePatchHash === codePatch.codePatchHash);
   $("#generate-code-plan").disabled = !isCurrentCandidate || !currentCandidate?.build?.passed || !contentApproved || Boolean(codePatch);
   $("#approve-code-plan").disabled = !codePatch || codePatch.status !== "proposed" || codePatchApproved;
+  $("#execute-code-plan").disabled = !codePatchApproved || Boolean(currentRun?.codePatchExecution?.childCandidateId);
   const codeReview = $("#code-patch-review");
   codeReview.hidden = !codePatch;
   if (codePatch) codeReview.textContent = JSON.stringify({
@@ -495,6 +496,16 @@ $("#approve-code-plan").onclick = () => action(async () => {
   const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/code-patch-approval`, { approved: true, expectedCodePatchHash: patch.codePatchHash }, "reviewer");
   await showRun();
   return `代码方案已由 ${result.approvedBy} 审核；当前未授予执行权限`;
+});
+$("#execute-code-plan").onclick = () => action(async () => {
+  const patch = currentRun?.codingPatch;
+  if (!currentCandidate || !patch || !currentRun?.codePatchApproval || patch.candidateHash !== currentCandidate.candidateHash) throw new Error("请先审核当前候选的代码方案");
+  $("#review-token-field").style.display = "grid";
+  $("#l2-token-field").style.display = "grid";
+  const grant = await api("POST", `/runs/${encodeURIComponent(runId)}/grants`, { tool: "apply_code_patch", candidateId: currentCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() }, "reviewer");
+  const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/code-patch-execution`, { grantId: grant.id }, "l2");
+  await showRun();
+  return `代码方案已在隔离 worktree 执行并创建新候选 ${result.candidate.id}；内容需要重新审核`;
 });
 $("#content-reviewed").onchange = () => renderDelivery();
 $("#payload-content").oninput = () => { $("#content-reviewed").checked = false; renderDelivery(); };

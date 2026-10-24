@@ -140,6 +140,7 @@ const schemas = {
       operation: Type.Union([Type.Literal("modify"), Type.Literal("create"), Type.Literal("delete")]),
       summary: Type.String({ minLength: 1, maxLength: 500 }),
       sourceRefs: Type.Array(Type.String({ minLength: 1, maxLength: 200 }), { maxItems: 10 }),
+      diff: Type.String({ minLength: 1, maxLength: 65536 }),
     }), { minItems: 1, maxItems: 20 })),
     expectedTests: Type.Array(Type.String({ minLength: 1, maxLength: 240 }), { minItems: 1, maxItems: 12 }),
     risks: Type.Array(Type.String({ minLength: 1, maxLength: 300 }), { maxItems: 8 }),
