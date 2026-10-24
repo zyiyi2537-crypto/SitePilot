@@ -25,7 +25,7 @@ import { createIntakeAdapterFromEnvironment, createOpenAICompatibleIntakeAdapter
 import { createPiModelRuntime, SitePilotAgentRuntime } from "./agent-runtime.js";
 import { createAgentToolRuntime, runCreationSupervisor } from "./agent-supervisor.js";
 import { JsonToolJournal, resolveToolJournalPath } from "./tool-runtime.js";
-import { applyUnifiedDiff } from "./code-patch.js";
+import { applyUnifiedDiff, validateUnifiedDiff } from "./code-patch.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -79,6 +79,62 @@ function codePatchHash(patch = {}) {
   return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
+function reviewDecisionHash(decision = {}) {
+  return crypto.createHash("sha256").update(JSON.stringify(decision)).digest("hex");
+}
+
+function normalizeRepairPatch(input, { candidate, source, reviewDecision, expectedReviewHash } = {}) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) throw new PolicyError("Repair patch must be an object", "SCHEMA_REJECTED");
+  const allowed = new Set(["whyNow", "expectedObservation", "stopIf", "risk", "status", "candidateId", "candidateHash", "expectedHead", "reviewDecisionHash", "files", "expectedTests", "risks", "codePatchHash"]);
+  if (Object.keys(input).some((field) => !allowed.has(field))) throw new PolicyError("Repair patch contains an unsupported field", "SCHEMA_REJECTED");
+  if (input.candidateId !== candidate.id || input.candidateHash !== candidate.candidateHash || input.expectedHead !== source.expectedHead || input.reviewDecisionHash !== expectedReviewHash) throw new PolicyError("Repair patch does not match the current candidate, source or ReviewDecision", "STALE_REVISION");
+  if (!/^[a-f0-9]{64}$/i.test(input.candidateHash) || !/^[a-f0-9]{64}$/i.test(input.reviewDecisionHash)) throw new PolicyError("Repair patch revision hashes are invalid", "SCHEMA_REJECTED");
+  if (input.status !== undefined && input.status !== "proposed") throw new PolicyError("Repair patch status is invalid", "SCHEMA_REJECTED");
+  if (typeof input.whyNow !== "string" || input.whyNow.length < 8 || input.whyNow.length > 300 || typeof input.expectedObservation !== "string" || input.expectedObservation.length < 8 || input.expectedObservation.length > 300 || !Array.isArray(input.stopIf) || input.stopIf.length > 5 || input.stopIf.some((item) => typeof item !== "string" || !item.trim() || item.length > 120) || !["low", "medium", "high"].includes(input.risk)) throw new PolicyError("Repair patch decision record is invalid", "SCHEMA_REJECTED");
+  if (!Array.isArray(input.expectedTests) || input.expectedTests.length < 1 || input.expectedTests.length > 12 || input.expectedTests.some((item) => typeof item !== "string" || !item.trim() || item.length > 240)) throw new PolicyError("Repair patch expected tests are invalid", "SCHEMA_REJECTED");
+  if (!Array.isArray(input.risks || []) || input.risks.length > 8 || input.risks.some((item) => typeof item !== "string" || !item.trim() || item.length > 300)) throw new PolicyError("Repair patch risks are invalid", "SCHEMA_REJECTED");
+  if (!Array.isArray(input.files) || input.files.length < 1 || input.files.length > 20) throw new PolicyError("Repair patch requires one to twenty files", "SCHEMA_REJECTED");
+  const allowedPaths = new Set(source.sourceFiles);
+  const pathFindings = (reviewDecision.findings || []).filter((finding) => typeof finding?.path === "string");
+  const addressedFindings = new Set();
+  const files = input.files.map((file) => {
+    if (!file || typeof file !== "object" || Array.isArray(file)) throw new PolicyError("Repair patch file entry is invalid", "SCHEMA_REJECTED");
+    if (Object.keys(file).some((key) => !["path", "operation", "summary", "diff", "findingIndexes"].includes(key))) throw new PolicyError("Repair patch file entry contains an unsupported field", "SCHEMA_REJECTED");
+    if (typeof file.path !== "string" || !file.path.trim() || file.path.length > 240 || file.path.startsWith("/") || file.path.split(/[\\/]/).includes("..") || /(^|[\\/])(?:\.env(?:\.|$)|\.git(?:[\\/]|$)|node_modules(?:[\\/]|$)|secrets?(?:[\\/]|$))/i.test(file.path) || !allowedPaths.has(file.path.replaceAll("\\", "/"))) throw new PolicyError(`Repair patch path is not in the current candidate: ${file.path}`, "POLICY_DENIED");
+    const normalizedPath = file.path.replaceAll("\\", "/");
+    if (file.operation !== undefined && file.operation !== "modify") throw new PolicyError("Repair patch may only modify existing candidate files", "SCHEMA_REJECTED");
+    if (typeof file.summary !== "string" || !file.summary.trim() || file.summary.length > 500) throw new PolicyError("Repair patch file summary is invalid", "SCHEMA_REJECTED");
+    const diff = validateUnifiedDiff(file.diff, normalizedPath);
+    const indexes = file.findingIndexes === undefined ? [] : file.findingIndexes;
+    if (!Array.isArray(indexes) || indexes.length > 12 || indexes.some((index) => !Number.isInteger(index) || index < 0 || index >= reviewDecision.findings.length)) throw new PolicyError("Repair patch finding references are invalid", "SCHEMA_REJECTED");
+    const referenced = indexes.map((index) => reviewDecision.findings[index]);
+    if (pathFindings.length && !pathFindings.some((finding) => finding.path === normalizedPath) && !referenced.some((finding) => !finding?.path)) throw new PolicyError(`Repair patch is not bound to a Review finding: ${normalizedPath}`, "POLICY_DENIED");
+    if (referenced.some((finding) => finding?.path && finding.path !== normalizedPath)) throw new PolicyError(`Repair patch finding does not match ${normalizedPath}`, "POLICY_DENIED");
+    indexes.forEach((index) => addressedFindings.add(index));
+    reviewDecision.findings.forEach((finding, index) => { if (finding.path === normalizedPath) addressedFindings.add(index); });
+    return { path: normalizedPath, operation: "modify", summary: file.summary.trim(), diff, findingIndexes: [...new Set(indexes)] };
+  });
+  if (new Set(files.map((file) => file.path)).size !== files.length) throw new PolicyError("Repair patch contains duplicate file paths", "SCHEMA_REJECTED");
+  if (reviewDecision.findings.some((_, index) => !addressedFindings.has(index))) throw new PolicyError("Repair patch does not address every Review finding", "POLICY_DENIED");
+  const normalized = {
+    whyNow: input.whyNow,
+    expectedObservation: input.expectedObservation,
+    stopIf: [...input.stopIf],
+    risk: input.risk,
+    status: "proposed",
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    expectedHead: source.expectedHead,
+    reviewDecisionHash: expectedReviewHash,
+    files,
+    expectedTests: [...input.expectedTests],
+    risks: [...(input.risks || [])],
+  };
+  const expectedHash = codePatchHash(normalized);
+  if (input.codePatchHash && input.codePatchHash !== expectedHash) throw new PolicyError("Repair patch hash does not match its contents", "STALE_REVISION");
+  return { ...normalized, codePatchHash: expectedHash };
+}
+
 export function createServer(store = new SitePilotStore(), auth = {}, evidence = new EvidenceStore(), registry = new BlockRegistry(), codeAtlas = null, payload = null, quality = null, generation = null, grants = new GrantStore(), payloadBuild = null, intake = null, modelAdapterFactory = createOpenAICompatibleIntakeAdapter, agentModelRuntimeFactory = createPiModelRuntime, agentToolJournal = null) {
   intake = intake || createIntakeAdapterFromEnvironment();
   const environmentIntake = intake;
@@ -127,8 +183,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     if (!generation?.worktreeRoot || !path.isAbsolute(generation.worktreeRoot)) throw new PolicyError("Candidate source inspection is not configured", "GENERATION_NOT_CONFIGURED");
     const declaredFiles = candidate.codeArtifact?.files;
     if (!Array.isArray(declaredFiles) || declaredFiles.length < 1 || declaredFiles.length > 200) throw new PolicyError("Candidate source manifest is invalid", "SOURCE_PACKAGE_REQUIRED");
-    const workspace = generationWorkspace(run, candidate.designDraftId);
-    if (path.resolve(candidate.codeArtifact?.workspace || "") !== workspace) throw new PolicyError("Candidate source workspace is not the server-owned design workspace", "POLICY_DENIED");
+    const configuredRunRoot = path.resolve(generation.worktreeRoot, run.id);
+    const workspace = candidate.codeArtifact?.workspace ? path.resolve(candidate.codeArtifact.workspace) : generationWorkspace(run, candidate.designDraftId);
+    if (workspace !== generationWorkspace(run, candidate.designDraftId) && !workspace.startsWith(`${configuredRunRoot}${path.sep}`)) throw new PolicyError("Candidate source workspace is not the server-owned run workspace", "POLICY_DENIED");
     const root = await fs.realpath(workspace);
     const configuredRoot = await fs.realpath(generation.worktreeRoot);
     if (!root.startsWith(`${configuredRoot}${path.sep}`)) throw new PolicyError("Candidate source resolves outside the configured worktree root", "POLICY_DENIED");
@@ -199,6 +256,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (apiToken.length < 32 || reviewerToken.length < 32 || !reviewerId || apiToken === reviewerToken) return send(res, 503, { code: "AUTH_NOT_CONFIGURED", message: "Distinct 32-character API and reviewer credentials are required" });
       const authorization = req.headers.authorization || "";
       const reviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/review$/);
+      const reworkMatch = url.pathname.match(/^\/candidates\/([^/]+)\/rework$/);
+      const reworkExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/rework-execution$/);
       const contentApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/content-approval$/);
       const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
       const codePatchExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-execution$/);
@@ -211,9 +270,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const candidatePreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/preview$/);
       const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
-      if ((generateMatch || codePatchExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      if ((generateMatch || codePatchExecutionMatch || reworkExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
       if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
+      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -620,6 +679,20 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (source.expectedHead !== patch.expectedHead) return send(res, 409, { code: "STALE_SOURCE_REVISION" });
           resource = codePatchWorkspace(run, candidate, patch);
           planHash = patch.codePatchHash;
+        } else if (tool === "apply_review_repair") {
+          if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+          const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
+          if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          const cycle = run.reviewCycle;
+          const patch = run.repairPatch;
+          const decision = candidate.independentReview;
+          if (!cycle || cycle.status !== "awaiting_repair" || cycle.parentCandidateId !== candidate.id || !patch || patch.candidateId !== candidate.id || !decision || decision.status !== "changes_requested") return send(res, 422, { code: "REPAIR_NOT_READY" });
+          const { decisionHash: storedHash, ...decisionContent } = decision;
+          const expectedDecisionHash = cycle.reviewDecisionHash || storedHash || reviewDecisionHash(decisionContent);
+          const source = await inspectCandidateSource(run, candidate);
+          if (expectedDecisionHash !== reviewDecisionHash(decisionContent) || patch.candidateHash !== candidate.candidateHash || patch.reviewDecisionHash !== expectedDecisionHash || patch.expectedHead !== source.expectedHead || codePatchHash(patch) !== patch.codePatchHash) return send(res, 409, { code: "STALE_REVISION" });
+          resource = codePatchWorkspace(run, candidate, patch);
+          planHash = patch.codePatchHash;
         } else return send(res, 422, { code: "TOOL_NOT_APPROVED" });
         const grant = grants.issue({ projectId: run.projectId, runId: run.id, tool, resource, planHash, expiresAt: input.expiresAt, issuedBy: reviewerId });
         store.event(run.id, "grant.issued", { grantId: grant.id, tool: grant.tool, resource: grant.resource });
@@ -767,6 +840,116 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         return send(res, 201, { candidate, generated, build });
         } finally { generatingRuns.delete(run.id); }
       }
+      if (req.method === "POST" && (reworkMatch || reworkExecutionMatch)) {
+        if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
+        const repairPathMatch = reworkMatch || reworkExecutionMatch;
+        const candidate = store.candidates.get(repairPathMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (reworkExecutionMatch && run?.repairExecution?.candidateId === candidate.id) {
+          const existing = store.candidates.get(run.repairExecution.childCandidateId);
+          if (existing) return send(res, 200, { candidate: existing, execution: run.repairExecution });
+        }
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        const cycle = run.reviewCycle;
+        if (!cycle || cycle.status !== "awaiting_repair" || cycle.parentCandidateId !== candidate.id) return send(res, 422, { code: "REPAIR_NOT_READY" });
+        const repairRound = Number.isInteger(cycle.repairRound) ? cycle.repairRound : Number.isInteger(cycle.round) ? cycle.round : 0;
+        const maxRounds = Number.isInteger(cycle.maxRounds) && cycle.maxRounds > 0 ? cycle.maxRounds : 3;
+        if (repairRound >= maxRounds) {
+          run.reviewCycle = Object.freeze({ ...cycle, repairRound, round: repairRound, maxRounds, status: "human_required", humanRequiredAt: new Date().toISOString() });
+          run.checkpoint = "human_review_required";
+          store.event(run.id, "review.repair.limit_exceeded", { candidateId: candidate.id, candidateHash: candidate.candidateHash, repairRound, maxRounds });
+          store.persist?.();
+          return send(res, 409, { code: "HUMAN_REVIEW_REQUIRED", repairRound, maxRounds, candidateId: candidate.id });
+        }
+        const reviewDecision = candidate.independentReview;
+        if (!reviewDecision || reviewDecision.status !== "changes_requested" || reviewDecision.candidateId !== candidate.id || reviewDecision.candidateHash !== candidate.candidateHash) return send(res, 422, { code: "REVIEW_CHANGES_REQUIRED" });
+        const { decisionHash: storedDecisionHash, ...decisionContent } = reviewDecision;
+        const actualReviewHash = reviewDecisionHash(decisionContent);
+        const expectedReviewHash = cycle.reviewDecisionHash || storedDecisionHash || actualReviewHash;
+        if (expectedReviewHash !== actualReviewHash) return send(res, 409, { code: "REVIEW_DECISION_CHANGED" });
+        if (cycle.reviewDecisionHash && cycle.reviewDecisionHash !== expectedReviewHash) return send(res, 409, { code: "STALE_REVISION" });
+        const input = await readJson(req);
+        const source = await inspectCandidateSource(run, candidate);
+        let patch = run.repairPatch;
+        if (patch && (patch.candidateId !== candidate.id || patch.candidateHash !== candidate.candidateHash || patch.reviewDecisionHash !== expectedReviewHash || patch.expectedHead !== source.expectedHead || codePatchHash(patch) !== patch.codePatchHash)) return send(res, 409, { code: "STALE_REVISION" });
+        if (input.patch !== undefined && !reworkMatch) return send(res, 422, { code: "REPAIR_PATCH_NOT_ALLOWED" });
+        if (input.patch !== undefined) {
+          patch = normalizeRepairPatch(input.patch, { candidate, source, reviewDecision, expectedReviewHash });
+          if (run.repairPatch && run.repairPatch.codePatchHash !== patch.codePatchHash) return send(res, 409, { code: "REPAIR_PATCH_ALREADY_PROPOSED" });
+          run.repairPatch = Object.freeze(patch);
+          run.checkpoint = "repair_ready_for_execution";
+          store.event(run.id, "review.repair.proposed", { candidateId: candidate.id, candidateHash: candidate.candidateHash, reviewDecisionHash: expectedReviewHash, patchHash: patch.codePatchHash, repairRound });
+          store.persist?.();
+        }
+        if (!patch) return send(res, 422, { code: "REPAIR_PATCH_REQUIRED" });
+        if (patch.candidateId !== candidate.id || patch.candidateHash !== candidate.candidateHash || patch.reviewDecisionHash !== expectedReviewHash || patch.expectedHead !== source.expectedHead || codePatchHash(patch) !== patch.codePatchHash) return send(res, 409, { code: "STALE_REVISION" });
+        if (reworkMatch) return send(res, 202, { status: "repair_ready_for_execution", candidateId: candidate.id, candidateHash: candidate.candidateHash, reviewDecisionHash: expectedReviewHash, repairRound, maxRounds, patch });
+        if (!input.grantId) return send(res, 422, { code: "GRANT_REQUIRED" });
+        const target = codePatchWorkspace(run, candidate, patch);
+        const executionKey = `${candidate.id}:${patch.codePatchHash}`;
+        if (executingCodePatches.has(executionKey)) return send(res, 409, { code: "REPAIR_EXECUTION_IN_PROGRESS" });
+        executingCodePatches.add(executionKey);
+        let targetCreated = false;
+        try {
+          grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "apply_review_repair", resource: target, planHash: patch.codePatchHash });
+          const sourceRoot = await fs.realpath(path.resolve(candidate.codeArtifact.workspace));
+          const patchByPath = new Map((patch.files || []).map((file) => [file.path, file]));
+          const outputManifest = [];
+          await fs.mkdir(target, { recursive: false });
+          targetCreated = true;
+          for (const entry of source.sourceManifest) {
+            const sourcePath = path.resolve(sourceRoot, entry.path);
+            const actualSource = await fs.realpath(sourcePath);
+            if (!actualSource.startsWith(`${sourceRoot}${path.sep}`)) throw new PolicyError("Candidate source resolves outside its worktree", "POLICY_DENIED");
+            const original = (await fs.readFile(actualSource)).toString("utf8");
+            const filePlan = patchByPath.get(entry.path);
+            const content = filePlan ? applyUnifiedDiff(original, filePlan.diff, entry.path) : original;
+            const targetPath = path.resolve(target, entry.path);
+            if (!targetPath.startsWith(`${target}${path.sep}`)) throw new PolicyError("Repair target escapes its worktree", "POLICY_DENIED");
+            await fs.mkdir(path.dirname(targetPath), { recursive: true });
+            await fs.writeFile(targetPath, content, "utf8");
+            outputManifest.push({ path: entry.path, size: Buffer.byteLength(content), sha256: crypto.createHash("sha256").update(content).digest("hex") });
+          }
+          const newHead = crypto.createHash("sha256").update(JSON.stringify(outputManifest.sort((left, right) => left.path.localeCompare(right.path)))).digest("hex");
+          const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+          const build = await validateGeneratedCandidate({ worktreeRoot: target, expectedDesignHash: design?.designHash || undefined });
+          const child = store.createCandidate(run.id, {
+            parentId: candidate.id,
+            designDraftId: candidate.designDraftId,
+            codeArtifact: { ...candidate.codeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, repairRound: repairRound + 1, designDraftId: candidate.designDraftId, designHash: design?.designHash || null },
+            build: { ...build, mode: "static-rebuild", passed: true },
+            sourceRefs: candidate.sourceRefs,
+          });
+          candidate.status = "superseded";
+          // A source revision invalidates all candidate-bound content and CMS approvals.
+          // ContentCMS must regenerate the model against the child hash before any CMS
+          // snapshot or Coding proposal can be accepted.
+          child.contentModel = null;
+          child.contentApproval = null;
+          const execution = Object.freeze({ candidateId: candidate.id, childCandidateId: child.id, candidateHash: candidate.candidateHash, patchHash: patch.codePatchHash, reviewDecisionHash: expectedReviewHash, sourceHead: patch.expectedHead, newHead, repairRound: repairRound + 1, executedBy: reviewerId, executedAt: new Date().toISOString(), buildPassed: true });
+          run.repairExecution = execution;
+          run.repairPatch = null;
+          run.reviewDecision = null;
+          run.codingPatch = null;
+          run.codePatchApproval = null;
+          run.codePatchExecution = null;
+          run.contentModel = null;
+          run.reviewCycle = Object.freeze({ ...cycle, repairRound: repairRound + 1, round: repairRound + 1, maxRounds, parentCandidateId: child.id, parentCandidateHash: child.candidateHash, previousReviewDecisionHash: expectedReviewHash, reviewDecisionHash: null, qualityReportHash: null, status: "awaiting_qa", updatedAt: new Date().toISOString() });
+          run.checkpoint = "awaiting_qa";
+          store.event(run.id, "review.repair.executed", execution);
+          store.event(run.id, "candidate.repair-revision.created", { parentCandidateId: candidate.id, candidateId: child.id, patchHash: patch.codePatchHash, repairRound: repairRound + 1, newHead });
+          store.persist?.();
+          return send(res, 201, { candidate: child, execution, build });
+        } catch (error) {
+          if (targetCreated) await fs.rm(target, { recursive: true, force: true }).catch(() => {});
+          store.event(run.id, "review.repair.execution.failed", { candidateId: candidate.id, patchHash: patch.codePatchHash, code: error.code || "BUILD_FAILED", reason: error.message });
+          store.persist?.();
+          throw error;
+        } finally {
+          executingCodePatches.delete(executionKey);
+        }
+      }
       if (req.method === "POST" && codePatchExecutionMatch) {
         if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
         const candidate = store.candidates.get(codePatchExecutionMatch[1]);
@@ -797,10 +980,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const outputManifest = [];
           await fs.mkdir(target, { recursive: false });
           targetCreated = true;
+          const sourceRoot = await fs.realpath(path.resolve(candidate.codeArtifact.workspace));
           for (const entry of source.sourceManifest) {
-            const sourcePath = path.resolve(generation.worktreeRoot, run.id, candidate.designDraftId, entry.path);
+            const sourcePath = path.resolve(sourceRoot, entry.path);
             const actualSource = await fs.realpath(sourcePath);
-            const sourceRoot = await fs.realpath(path.resolve(generation.worktreeRoot, run.id, candidate.designDraftId));
             if (!actualSource.startsWith(`${sourceRoot}${path.sep}`)) throw new PolicyError("Candidate source resolves outside its worktree", "POLICY_DENIED");
             const original = (await fs.readFile(actualSource)).toString("utf8");
             const filePlan = patchByPath.get(entry.path);
@@ -993,12 +1176,19 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!quality || typeof quality.run !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
         const candidate = store.candidates.get(qaMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
         if (candidate.cmsSnapshot && !candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const report = await quality.run({ ...(await readJson(req)), candidateId: candidate.id, candidateHash: candidate.candidateHash });
         if (report.candidateId !== candidate.id || report.candidateHash !== candidate.candidateHash) {
           throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
         }
         store.markQuality(candidate.id, { passed: report.passed, reportHash: report.reportHash, checks: report.results });
+        if (run.reviewCycle?.parentCandidateId === candidate.id && ["awaiting_qa", "qa_failed"].includes(run.reviewCycle.status)) {
+          run.reviewCycle = Object.freeze({ ...run.reviewCycle, status: report.passed ? "awaiting_review" : "qa_failed", qualityReportHash: report.reportHash, updatedAt: new Date().toISOString() });
+          run.checkpoint = report.passed ? "qa_passed" : "qa_failed";
+        }
+        store.persist?.();
         return send(res, 200, report);
       }
       if (req.method === "POST" && reviewMatch) {

@@ -284,6 +284,104 @@ test("Review phase requires QA and persists a candidate-bound independent decisi
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("Review changes_requested creates bounded repair candidates and stops after three rounds", async (t) => {
+  const worktreeRoot = await fs.mkdtemp(path.join(os.tmpdir(), "sitepilot-repair-api-"));
+  t.after(() => fs.rm(worktreeRoot, { recursive: true, force: true }));
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Repair a reviewed website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const workspace = path.join(worktreeRoot, run.id, design.id);
+  const sourcePath = "src/app/home.tsx";
+  const manifestPath = "src/generated/sitepilot-manifest.json";
+  const source = "export default function Page() { return <main data-sitepilot-page=\"home\">Needs repair</main>; }\n";
+  const routes = [{ page: "home", route: "/", file: sourcePath }];
+  const manifest = { routes, sourceManifestHash: hash(routes), design: { designHash: design.designHash } };
+  await fs.mkdir(path.dirname(path.join(workspace, sourcePath)), { recursive: true });
+  await fs.mkdir(path.dirname(path.join(workspace, manifestPath)), { recursive: true });
+  await fs.writeFile(path.join(workspace, sourcePath), source);
+  await fs.writeFile(path.join(workspace, manifestPath), `${JSON.stringify(manifest)}\n`);
+  const candidate = store.createCandidate(run.id, {
+    designDraftId: design.id,
+    build: { passed: true },
+    codeArtifact: { workspace, files: [sourcePath, manifestPath], head: "local-uncommitted", designDraftId: design.id, designHash: design.designHash },
+  });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa_repair_1", results: [{ check: "links", passed: true }] });
+  const decision = {
+    status: "changes_requested",
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    qualityReportHash: candidate.quality.reportHash,
+    whyNow: "发现首页实现问题",
+    expectedObservation: "修复后只生成新的候选版本",
+    stopIf: ["候选源码发生变化"],
+    risk: "medium",
+    summary: "请修复首页文案标记",
+    findings: [{ severity: "high", path: sourcePath, message: "页面需要修复", evidence: "Review source" }],
+    questions: [],
+  };
+  candidate.independentReview = { ...decision, decisionHash: hash(decision) };
+  run.reviewDecision = decision;
+  run.reviewCycle = { repairRound: 0, round: 0, maxRounds: 3, parentCandidateId: candidate.id, parentCandidateHash: candidate.candidateHash, reviewDecisionHash: hash(decision), status: "awaiting_repair" };
+  const l2Token = "c".repeat(32);
+  const server = createServer(store, { apiToken, reviewerToken, l2Token, reviewerId: "reviewer" }, undefined, undefined, null, null, null, { worktreeRoot });
+  const blockedDraft = await request(server, "POST", `/candidates/${candidate.id}/review`, reviewerToken, { approved: true });
+  assert.equal(blockedDraft.status, 422);
+  assert.equal(blockedDraft.body.code, "REVIEW_GATE_REQUIRED");
+  const diff = `--- a/${sourcePath}\n+++ b/${sourcePath}\n@@ -1,1 +1,1 @@\n-${source.slice(0, -1)}\n+export default function Page() { return <main data-sitepilot-page=\"home\">Repaired</main>; }\n`;
+  const patch = {
+    whyNow: "Review 指出了首页实现问题",
+    expectedObservation: "隔离子候选包含修复后的页面",
+    stopIf: ["候选 hash 变化"],
+    risk: "medium",
+    status: "proposed",
+    candidateId: candidate.id,
+    candidateHash: candidate.candidateHash,
+    expectedHead: hash([
+      { path: manifestPath, size: Buffer.byteLength(`${JSON.stringify(manifest)}\n`), sha256: crypto.createHash("sha256").update(`${JSON.stringify(manifest)}\n`).digest("hex") },
+      { path: sourcePath, size: Buffer.byteLength(source), sha256: crypto.createHash("sha256").update(source).digest("hex") },
+    ].sort((left, right) => left.path.localeCompare(right.path))),
+    reviewDecisionHash: hash(decision),
+    files: [{ path: sourcePath, operation: "modify", summary: "修复首页标记", findingIndexes: [0], diff }],
+    expectedTests: ["npm test"],
+    risks: [],
+  };
+  const stalePatch = { ...patch, candidateHash: "f".repeat(64) };
+  const staleProposal = await request(server, "POST", `/candidates/${candidate.id}/rework`, reviewerToken, { patch: stalePatch });
+  assert.equal(staleProposal.status, 422);
+  assert.equal(staleProposal.body.code, "STALE_REVISION");
+  const proposal = await request(server, "POST", `/candidates/${candidate.id}/rework`, reviewerToken, { patch });
+  assert.equal(proposal.status, 202, JSON.stringify(proposal.body));
+  assert.equal(proposal.body.status, "repair_ready_for_execution");
+  const unauthorized = await request(server, "POST", `/candidates/${candidate.id}/rework-execution`, reviewerToken, {});
+  assert.equal(unauthorized.status, 401);
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, reviewerToken, { tool: "apply_review_repair", candidateId: candidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(grant.status, 201, JSON.stringify(grant.body));
+  const executed = await request(server, "POST", `/candidates/${candidate.id}/rework-execution`, l2Token, { grantId: grant.body.id });
+  assert.equal(executed.status, 201, JSON.stringify(executed.body));
+  const child = executed.body.candidate;
+  assert.equal(child.parentId, candidate.id);
+  assert.equal(child.quality, null);
+  assert.equal(child.independentReview, undefined);
+  assert.equal(child.contentModel, null);
+  assert.equal(child.contentApproval, null);
+  assert.equal(child.cmsSnapshot, null);
+  assert.equal(run.contentModel, null);
+  assert.equal(candidate.status, "superseded");
+  assert.equal(run.reviewCycle.status, "awaiting_qa");
+  assert.equal(run.reviewCycle.repairRound, 1);
+  assert.equal(await fs.readFile(path.join(child.codeArtifact.workspace, sourcePath), "utf8"), "export default function Page() { return <main data-sitepilot-page=\"home\">Repaired</main>; }\n");
+
+  run.reviewCycle = { ...run.reviewCycle, status: "awaiting_repair", repairRound: 3, round: 3, parentCandidateId: child.id, parentCandidateHash: child.candidateHash };
+  child.independentReview = { ...decision, candidateId: child.id, candidateHash: child.candidateHash, qualityReportHash: "qa_repair_2", decisionHash: hash({ ...decision, candidateId: child.id, candidateHash: child.candidateHash, qualityReportHash: "qa_repair_2" }) };
+  const limit = await request(server, "POST", `/candidates/${child.id}/rework`, reviewerToken, {});
+  assert.equal(limit.status, 409);
+  assert.equal(limit.body.code, "HUMAN_REVIEW_REQUIRED");
+  assert.equal(run.reviewCycle.status, "human_required");
+});
+
 test("ContentCMS drafting stays below the Payload write grant", () => {
   assert.throws(() => createPiTool({
     role: "ContentCMS",

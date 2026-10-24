@@ -2,7 +2,7 @@
 
 Natural-language intake supports OpenAI-compatible Chat Completions and Responses API endpoints. In Studio, enter the provider URL, model, API key, and protocol, then test and apply the configuration. Studio credentials live only in page/process memory; they are not returned, logged, or saved to the database. Managed installs may instead set `SITEPILOT_MODEL_BASE_URL`, `SITEPILOT_MODEL_API_KEY`, `SITEPILOT_MODEL_NAME`, and `SITEPILOT_MODEL_API_MODE`. Requirement previews expire after 15 minutes and create no project until confirmation. Extracted facts require source evidence; unsupported facts remain blocked.
 
-SitePilot is an evidence-driven website delivery system organized around a Supervisor and specialist agents. Pi powers `Supervisor → Architect → Research`, candidate-bound ContentCMS drafting, and a bounded Coding proposal stage. ContentCMS produces a proposed, Claim-referenced ContentModel only after the current design, page plan and build are ready; missing facts stop for customer input. Coding runs only after reviewer approval of that model and emits a CodePatch plan bound to the candidate, design and source snapshot. Coding cannot write files or execute commands in this phase; edits remain behind separate worktree, sandbox, L2 grant and review gates. QA and independent Review are not yet dispatched by the Pi Supervisor.
+SitePilot is an evidence-driven website delivery system organized around a Supervisor and specialist agents. Pi powers `Supervisor → Architect → Research`, candidate-bound ContentCMS drafting, bounded Coding proposals, and independent read-only Review. Review requires passing candidate-bound QA; `changes_requested` findings can be turned into an immutable child candidate through a reviewer-submitted manifest-bound patch and a separate single-use L2 grant. Each repaired candidate must pass QA and independent Review again; after three repair rounds the run stops for a human. These repair checks currently use the generated-candidate structural validator, not a real Payload build or full automated Coding retry loop.
 
 ## Local development status (2026-10)
 
@@ -23,7 +23,7 @@ SitePilot is an evidence-driven website delivery system organized around a Super
 The existing guarded delivery slice remains deliberately small:
 
 - `src/core.js` contains the project/run/task/candidate state model, strategy planner, worktree path policy, and fail-closed tool policy.
-- `src/server.js` exposes project/run/candidate workflows, the Pi-backed `POST /runs/:id/agent` route, read-only Agent state/decision records, and reviewer-only packaging routes. Quality decisions are internal and cannot be submitted through HTTP.
+- `src/server.js` exposes project/run/candidate workflows, the Pi-backed `POST /runs/:id/agent` route, read-only Agent state/decision records, reviewer-only packaging routes, and the bounded Review repair endpoints. Quality decisions are internal and cannot be submitted through HTTP.
 - `src/registry.js` and `src/tool-runtime.js` keep reusable components reviewable and tool execution auditable.
 - `docs/PI-ADOPTION.md` records the reviewed MIT Pi source, implemented first slice, security boundaries, and remaining role rollout.
 - `src/cli.js` runs an industrial bilingual website scenario with a mock planner and a fixed `startup-nextjs` source reference.

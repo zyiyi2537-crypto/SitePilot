@@ -87,6 +87,10 @@ function codePatchHash(patch) {
   return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
 }
 
+function reviewDecisionHash(decision) {
+  return crypto.createHash("sha256").update(JSON.stringify(decision)).digest("hex");
+}
+
 function validateCodePatchPlan(plan, context = {}) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) throw new PolicyError("CodePatch must be an object", "SCHEMA_REJECTED");
   const allowedFields = new Set(["whyNow", "expectedObservation", "stopIf", "risk", "status", "candidateId", "candidateHash", "designDraftId", "designHash", "pagePlanHash", "contentHash", "expectedHead", "files", "expectedTests", "risks", "questions", "codePatchHash"]);
@@ -605,9 +609,25 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
       const normalized = validateReviewDecision(decision, review);
       state.review = normalized;
       run.reviewDecision = normalized;
-      review.candidate.independentReview = Object.freeze(normalized);
+      const decisionHash = reviewDecisionHash(normalized);
+      review.candidate.independentReview = Object.freeze({ ...normalized, decisionHash });
+      const priorCycle = run.reviewCycle || {};
+      const repairRound = Number.isInteger(priorCycle.repairRound)
+        ? priorCycle.repairRound
+        : Number.isInteger(priorCycle.round) ? Math.max(0, priorCycle.round - 1) : 0;
+      run.reviewCycle = Object.freeze({
+        repairRound,
+        round: repairRound,
+        maxRounds: Number.isInteger(priorCycle.maxRounds) && priorCycle.maxRounds > 0 ? priorCycle.maxRounds : 3,
+        parentCandidateId: review.candidate.id,
+        parentCandidateHash: review.candidate.candidateHash,
+        reviewDecisionHash: decisionHash,
+        status: normalized.status === "changes_requested" ? "awaiting_repair" : normalized.status === "approved" ? "approved" : "needs_input",
+        findings: normalized.findings,
+        updatedAt: new Date().toISOString(),
+      });
       store.recordArtifact(run.id, createArtifact({ type: "ReviewDecision", role: "Review", runId: run.id, inputRefs: [inputSnapshotId, review.candidateId, review.candidateHash, review.qualityReportHash], output: normalized, status: normalized.status, risk: normalized.risk }));
-      store.event(run.id, "agent.delegation.completed", { role: "Review", status: normalized.status, candidateId: review.candidateId, candidateHash: review.candidateHash, qualityReportHash: review.qualityReportHash });
+      store.event(run.id, "agent.delegation.completed", { role: "Review", status: normalized.status, candidateId: review.candidateId, candidateHash: review.candidateHash, qualityReportHash: review.qualityReportHash, decisionHash, repairRound });
       if (normalized.status === "needs_input") {
         state.questions = normalized.questions;
         return { status: "needs_input", questions: state.questions, reviewDecision: normalized, terminate: true };
@@ -674,10 +694,10 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     artifactIds: (run.artifactIds || []).slice(),
     lastDecision: decision,
   };
-  run.checkpoint = status === "needs_input" ? "agent_needs_input" : state.review ? "independent_review_completed" : state.coding ? "code_patch_review_required" : state.content ? "content_review_required" : contentOnly ? "content_agent_incomplete" : "agent_strategy_research_ready";
+  run.checkpoint = status === "needs_input" ? "agent_needs_input" : state.review?.status === "changes_requested" ? "review_changes_requested" : state.review ? "independent_review_completed" : state.coding ? "code_patch_review_required" : state.content ? "content_review_required" : contentOnly ? "content_agent_incomplete" : "agent_strategy_research_ready";
   store.event(run.id, "supervisor.completed", { status, artifactCount: run.artifactIds?.length || 0, delegations: state.delegations });
   store.persist?.();
-  return { status, decision, strategy: state.strategy, research: state.research, contentModel: state.content, codePatch: state.coding, reviewDecision: state.review, independent_review_required: Boolean(reviewOnly), review_approved: state.review?.status === "approved", review_changes_requested: state.review?.status === "changes_requested", questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
+  return { status, decision, strategy: state.strategy, research: state.research, contentModel: state.content, codePatch: state.coding, reviewDecision: state.review, reviewDecisionHash: state.review ? reviewDecisionHash(state.review) : null, reviewCycle: run.reviewCycle || null, independent_review_required: Boolean(reviewOnly), review_approved: state.review?.status === "approved", review_changes_requested: state.review?.status === "changes_requested", questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
 }
 
 export function createAgentToolRuntime(store, journal = null) {
