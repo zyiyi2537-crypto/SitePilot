@@ -501,6 +501,81 @@ test("design feedback creates an isolated child candidate and blocks duplicate r
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("design feedback revokes old Payload previews and blocks stale candidate actions", async () => {
+  const store = new SitePilotStore();
+  const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer-1" };
+  const registeredPreviews = new Map();
+  let qualityRunCount = 0;
+  let previewStopCount = 0;
+  const quality = {
+    preview: {
+      registerPreview: (preview) => registeredPreviews.set(preview.id, preview),
+      unregisterPreview: (id) => registeredPreviews.delete(id),
+      hasPreview: (id) => registeredPreviews.has(id),
+      matchesPreview: (id, candidateHash) => registeredPreviews.get(id)?.candidateHash === candidateHash,
+    },
+    run: async ({ candidateId, candidateHash }) => { qualityRunCount += 1; return { candidateId, candidateHash, passed: true, reportHash: "qa" }; },
+  };
+  const payloadBuild = {
+    worktreeRoot: "/tmp/sitepilot-design-revision-payload",
+    startPreview: async () => ({
+      baseUrl: "http://127.0.0.1:43125/",
+      expiresAt: Date.now() + 60_000,
+      stop: async () => { previewStopCount += 1; },
+    }),
+  };
+  const server = createServer(store, auth, undefined, undefined, null, null, quality, null, undefined, payloadBuild);
+  const project = store.createProject({ goal: "feedback invalidation" });
+  const run = store.createRun(project.id);
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "r", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const firstDesign = await request(server, "POST", `/runs/${run.id}/design-drafts`, auth.apiToken, {});
+  assert.equal(firstDesign.status, 201);
+  const candidate = store.createCandidate(run.id, {
+    designDraftId: firstDesign.body.id,
+    codeArtifact: { payloadWorktree: { repositoryPathRef: "worktree" } },
+    build: { passed: true, requiresPayloadBuild: true },
+  });
+  candidate.payloadBuild = { passed: true, candidateHash: candidate.candidateHash };
+  const previewGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, {
+    tool: "start_payload_preview",
+    candidateId: candidate.id,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  assert.equal(previewGrant.status, 201);
+  const preview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview/start`, auth.l2Token, { grantId: previewGrant.body.id });
+  assert.equal(preview.status, 201, JSON.stringify(preview.body));
+  assert.equal(registeredPreviews.has(preview.body.previewId), true);
+
+  const patched = await request(server, "POST", `/design-drafts/${firstDesign.body.id}/patches`, auth.apiToken, {
+    expectedDesignHash: firstDesign.body.designHash,
+    operations: [{ op: "set_props", page: "home", componentId: firstDesign.body.pageTree[0].components[0].instanceId, props: { density: "compact" } }],
+  });
+  assert.equal(patched.status, 201, JSON.stringify(patched.body));
+  assert.equal(candidate.status, "superseded");
+  assert.equal(registeredPreviews.has(preview.body.previewId), false);
+  assert.equal(previewStopCount, 1);
+
+  const status = await request(server, "GET", `/candidates/${candidate.id}/payload-preview`, auth.apiToken);
+  assert.equal(status.status, 200);
+  assert.equal(status.body.active, false);
+  const stalePreview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, {
+    baseUrl: "http://127.0.0.1:43125/",
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+  });
+  assert.equal(stalePreview.status, 409);
+  assert.equal(stalePreview.body.code, "STALE_DESIGN_REVISION");
+  const stalePreviewStart = await request(server, "POST", `/candidates/${candidate.id}/payload-preview/start`, auth.l2Token, { grantId: "missing" });
+  assert.equal(stalePreviewStart.status, 409);
+  assert.equal(stalePreviewStart.body.code, "STALE_DESIGN_REVISION");
+  const staleBuild = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: "missing" });
+  assert.equal(staleBuild.status, 409);
+  assert.equal(staleBuild.body.code, "STALE_DESIGN_REVISION");
+  const staleQa = await request(server, "POST", `/candidates/${candidate.id}/qa`, auth.apiToken, { qaPreviewId: preview.body.previewId, routes: ["/"], locales: ["en"] });
+  assert.equal(staleQa.status, 409);
+  assert.equal(staleQa.body.code, "STALE_DESIGN_REVISION");
+  assert.equal(qualityRunCount, 0);
+});
+
 test("Payload worktree and build actions require scoped single-use L2 grants", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "website" });

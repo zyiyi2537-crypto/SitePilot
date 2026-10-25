@@ -173,6 +173,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     return text ? JSON.parse(text) : {};
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
+  const candidateMatchesCurrentDesign = (run, candidate) => !run?.designDraftId || candidate?.designDraftId === run.designDraftId;
   const stopPayloadPreviews = async (candidateId) => {
     const candidate = store.candidates.get(candidateId);
     const registeredPreviewId = candidate?.payloadPreview?.previewId;
@@ -181,10 +182,25 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       clearTimeout(session.timer);
       payloadPreviewSessions.delete(previewId);
       quality?.preview?.unregisterPreview?.(previewId);
-      await session.stop?.();
+      try { await session.stop?.(); } catch { /* Lease revocation must finish if the runner is already gone. */ }
     }
     if (registeredPreviewId) quality?.preview?.unregisterPreview?.(registeredPreviewId);
     if (candidate?.payloadPreview) candidate.payloadPreview = Object.freeze({ ...candidate.payloadPreview, stoppedAt: new Date().toISOString() });
+  };
+  const stopDesignBoundPreviews = async (run, designDraftId) => {
+    if (!designDraftId) return;
+    for (const candidateId of run?.candidateIds || []) {
+      const candidate = store.candidates.get(candidateId);
+      if (candidate?.designDraftId !== designDraftId) continue;
+      for (const [sessionId, session] of previewSessions) {
+        if (session.candidateId !== candidate.id) continue;
+        clearTimeout(session.timer);
+        previewSessions.delete(sessionId);
+        quality?.preview?.unregisterPreview?.(sessionId);
+        await session.preview.close().catch(() => {});
+      }
+      await stopPayloadPreviews(candidate.id);
+    }
   };
   const candidateBuildReady = (candidate) => candidate?.build?.passed === true
     && (candidate.build.requiresPayloadBuild !== true || candidate.payloadBuild?.passed === true && candidate.payloadBuild.candidateHash === candidate.candidateHash);
@@ -477,6 +493,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const candidate = store.candidates.get(input.candidateId);
           if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
           if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (run.codingPatch?.candidateHash === candidate.candidateHash && run.codingPatch?.designHash === candidate.revision?.designHash) return send(res, 409, { code: "CODE_PATCH_ALREADY_PROPOSED" });
           if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
@@ -517,6 +534,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const candidate = store.candidates.get(input.candidateId);
           if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
           if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           const cycle = run.reviewCycle;
           if (!cycle || cycle.status !== "awaiting_repair" || cycle.parentCandidateId !== candidate.id) return send(res, 422, { code: "REPAIR_NOT_READY" });
           const decision = candidate.independentReview;
@@ -565,6 +583,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const candidate = store.candidates.get(input.candidateId);
           if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
           if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (!candidate.quality?.passed) return send(res, 422, { code: "QUALITY_GATE_REQUIRED" });
           if (!candidate.quality.reportHash || typeof candidate.quality.reportHash !== "string") return send(res, 422, { code: "QUALITY_REPORT_REQUIRED" });
           if (run.reviewDecision?.candidateId === candidate.id && run.reviewDecision?.candidateHash === candidate.candidateHash && run.reviewDecision?.qualityReportHash === candidate.quality.reportHash) return send(res, 409, { code: "REVIEW_ALREADY_COMPLETED" });
@@ -594,6 +613,17 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
           const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding: coding || repair, review });
+          const agentCandidate = contentCms?.candidate || coding?.candidate || repair?.candidate || review?.candidate;
+          if (agentCandidate && (latestCandidate(run)?.id !== agentCandidate.id || !candidateMatchesCurrentDesign(run, agentCandidate))) {
+            if (run.contentModel?.candidateId === agentCandidate.id) run.contentModel = null;
+            if (agentCandidate.contentModel?.candidateId === agentCandidate.id) agentCandidate.contentModel = null;
+            if (run.codingPatch?.candidateId === agentCandidate.id) run.codingPatch = null;
+            if (run.reviewDecision?.candidateId === agentCandidate.id) run.reviewDecision = null;
+            if (run.reviewCycle?.parentCandidateId === agentCandidate.id) run.reviewCycle = null;
+            if (run.repairPatch?.candidateId === agentCandidate.id) run.repairPatch = null;
+            store.persist?.();
+            return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+          }
           if (run.strategy) run.payloadSchema = planPayloadSchema({ projectId: run.projectId, strategy: run.strategy, locales: run.strategy.locales || run.inputSnapshot.locale });
           const returnedContentModel = result.contentModel || (contentCms?.candidate ? run.contentModel : null);
           if (returnedContentModel) {
@@ -639,9 +669,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
         const candidate = store.candidates.get(candidatePreviewMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const workspace = candidate.codeArtifact?.workspace;
-        const run = store.runs.get(candidate.runId);
         const runRoot = run ? path.resolve(generation.worktreeRoot, run.id) : null;
         const expectedWorkspace = workspace ? path.resolve(workspace) : null;
         if (!expectedWorkspace || !runRoot || (expectedWorkspace !== runRoot && !expectedWorkspace.startsWith(`${runRoot}${path.sep}`))) throw new PolicyError("Preview workspace is outside the server-owned run directory", "POLICY_DENIED");
@@ -653,6 +685,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         await validateGeneratedCandidate({ worktreeRoot: expectedWorkspace, expectedDesignHash: expectedDesignHash || undefined });
         const preview = new LocalPreviewServer({ plan: manifest });
         const address = await preview.listen();
+        if (latestCandidate(run)?.id !== candidate.id || !candidateMatchesCurrentDesign(run, candidate)) {
+          await preview.close();
+          return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+        }
         const sessionId = `preview_${crypto.randomUUID().replaceAll("-", "")}`;
         const expiresAt = Date.now() + previewTtlMs;
         const publicSession = Object.freeze({ sessionId, candidateId: candidate.id, candidateHash: candidate.candidateHash, designDraftId: candidate.designDraftId || null, designHash: manifest.design?.designHash || null, baseUrl: `http://${address.host}:${address.port}/`, expiresAt: new Date(expiresAt).toISOString(), localOnly: true, writesAllowed: false });
@@ -677,6 +713,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const candidate = store.candidates.get(payloadPlanMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
+        if (run && !candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (!run?.strategy) return send(res, 422, { code: "STRATEGY_REQUIRED" });
         const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
         if (candidate.designDraftId && !design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
@@ -763,6 +800,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
           if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
           if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
           resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
@@ -771,6 +809,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!payloadBuild || typeof payloadBuild.startPreview !== "function") return send(res, 503, { code: "PAYLOAD_PREVIEW_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
           if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
           if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
@@ -780,6 +819,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
           if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           const patch = run.codingPatch;
           const approval = run.codePatchApproval;
           if (!patch || patch.status !== "proposed" || !approval || approval.codePatchHash !== patch.codePatchHash || approval.executionGranted !== false) return send(res, 422, { code: "CODE_PATCH_APPROVAL_REQUIRED" });
@@ -791,6 +831,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
           if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           const cycle = run.reviewCycle;
           const patch = run.repairPatch;
           const decision = candidate.independentReview;
@@ -841,6 +882,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.payloadBuild?.passed && candidate.payloadBuild.candidateHash === candidate.candidateHash) {
           return send(res, 200, { candidate, build: candidate.payloadBuild, idempotent: true });
         }
@@ -858,7 +900,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             throw new PolicyError("Payload build report is not bound to the current candidate and pinned source", "STALE_REVISION");
           }
           if (!passed) throw new PolicyError("Payload sandbox build did not pass", "BUILD_FAILED");
-          if (latestCandidate(run)?.id !== candidate.id || store.candidates.get(candidate.id)?.candidateHash !== candidate.candidateHash) {
+          if (latestCandidate(run)?.id !== candidate.id || store.candidates.get(candidate.id)?.candidateHash !== candidate.candidateHash || !candidateMatchesCurrentDesign(run, candidate)) {
             throw new PolicyError("Candidate changed while its Payload build was running", "STALE_CANDIDATE");
           }
           const receipt = Object.freeze({
@@ -889,12 +931,14 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.build?.requiresPayloadBuild !== true || !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const existing = candidate.payloadPreview;
         if (existing?.candidateHash === candidate.candidateHash && existing.expiresAt > Date.now() && payloadPreviewSessions.has(existing.previewId)) {
           return send(res, 200, { previewId: existing.previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(existing.expiresAt).toISOString(), localOnly: true, writesAllowed: false, idempotent: true });
         }
         const input = await readJson(req);
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
         if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
         const resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
@@ -902,6 +946,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         let started;
         try {
           started = await payloadBuild.startPreview({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } });
+          if (latestCandidate(run)?.id !== candidate.id || !candidateMatchesCurrentDesign(run, candidate)) throw new PolicyError("Design changed while its Payload preview was starting", "STALE_DESIGN_REVISION");
           const previewUrl = new URL(started.baseUrl);
           const now = Date.now();
           const expiresAt = Number(started.expiresAt);
@@ -936,7 +981,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const candidate = store.candidates.get(payloadPreviewMatch[1]);
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const preview = candidate.payloadPreview;
-        const active = Boolean(preview && !preview.stoppedAt && preview.expiresAt > Date.now() && (payloadPreviewSessions.has(preview.previewId) || quality?.preview?.hasPreview?.(preview.previewId) === true));
+        const active = Boolean(candidateMatchesCurrentDesign(store.runs.get(candidate.runId), candidate) && preview && !preview.stoppedAt && preview.expiresAt > Date.now() && (payloadPreviewSessions.has(preview.previewId) || quality?.preview?.hasPreview?.(preview.previewId) === true));
         return send(res, 200, { candidateId: candidate.id, candidateHash: candidate.candidateHash, previewId: preview?.previewId || null, expiresAt: preview?.expiresAt ? new Date(preview.expiresAt).toISOString() : null, active, localOnly: true, writesAllowed: false });
       }
       if (req.method === "POST" && payloadPreviewMatch) {
@@ -945,8 +990,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.build?.requiresPayloadBuild !== true || !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const input = await readJson(req);
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
         let previewUrl;
         try { previewUrl = new URL(baseUrl); }
@@ -966,6 +1013,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           return send(res, 200, { previewId: existing.previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(existing.expiresAt).toISOString(), localOnly: true, writesAllowed: false, idempotent: true });
         }
         const previewId = `payload_preview_${crypto.randomUUID().replaceAll("-", "")}`;
+        if (latestCandidate(run)?.id !== candidate.id || !candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         quality.preview.registerPreview({ id: previewId, baseUrl: previewUrl.href, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
         const timer = setTimeout(() => {
           payloadPreviewSessions.delete(previewId);
@@ -1005,11 +1053,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const run = store.runs.get(designDraftMatch[1]);
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
+        const previousDesignDraftId = run.designDraftId;
         const input = await readJson(req);
         const draft = store.createDesignDraft(run.id, {
           ...input,
           designTokens: input.designTokens || run.strategy?.designTokens,
         });
+        if (previousDesignDraftId && previousDesignDraftId !== draft.id) await stopDesignBoundPreviews(run, previousDesignDraftId);
         store.persist?.();
         return send(res, 201, draft);
       }
@@ -1023,8 +1073,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (req.method === "POST" && designPatchMatch) {
         const design = store.designs.get(designPatchMatch[1]);
         if (!design) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(design.runId);
         const input = await readJson(req);
         const result = store.applyDesignPatch(design.id, { ...input, actor: input.actor || "api-operator" });
+        await stopDesignBoundPreviews(run, design.id);
         store.persist?.();
         return send(res, 201, result);
       }
@@ -1089,6 +1141,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           ? await bindGeneratedCandidateToPayloadWorktree({ sourceRoot: root, files: generated.files, payloadRoot: payloadBuild.worktreeRoot, payloadWorktree: run.payloadWorktree })
           : null;
         const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
+        if (run.designDraftId !== designDraft.id) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+        if (latestCandidate(run)?.id !== previousCandidate?.id) return send(res, 409, { code: "STALE_CANDIDATE" });
         const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash, ...(payloadWorktree ? { payloadWorktree } : {}) }, build: { ...build, requiresPayloadBuild: true, mode: payloadWorktree ? "payload-worktree-bound" : "static-scaffold" }, sourceRefs: run.research?.evidence || [] });
         if (previousCandidate) await stopPayloadPreviews(previousCandidate.id);
         run.checkpoint = "candidate_ready";
@@ -1300,6 +1354,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const input = await readJson(req);
         const run = store.runs.get(candidate.runId);
         const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        if (run && !candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.designDraftId && !design) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
         const autoPlan = input.contentByPage !== undefined || input.usePayloadPlan === true || input.pageOperations === undefined;
         let plan = null;
@@ -1354,6 +1409,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           designMappings: plan?.designMappings || null,
           environment: "sandbox",
         });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (!receipt || receipt.candidateId !== candidate.id || receipt.status !== "sandbox_draft") {
           throw new PolicyError("Payload snapshot receipt is not bound to this sandbox candidate", "CMS_INVALID_RECEIPT");
         }
@@ -1382,7 +1438,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
+        if (run && !candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         const input = await readJson(req);
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (input.approved !== true) return send(res, 422, { code: "CONTENT_REVIEW_NOT_APPROVED" });
         const model = candidate.contentModel || (run?.contentModel?.candidateId === candidate.id ? run.contentModel : null);
         if (!model || model.status !== "proposed" || !model.contentHash) return send(res, 422, { code: "CONTENT_MODEL_REQUIRED" });
@@ -1400,10 +1458,12 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         const patch = run.codingPatch;
         const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
         const contentModel = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
         const input = await readJson(req);
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (input.approved !== true) return send(res, 422, { code: "CODE_PATCH_REVIEW_NOT_APPROVED" });
         if (!patch || patch.status !== "proposed") return send(res, 422, { code: "CODE_PATCH_REQUIRED" });
         if (patch.candidateId !== candidate.id || patch.candidateHash !== candidate.candidateHash || patch.designDraftId !== design?.id || patch.designHash !== design?.designHash || patch.pagePlanHash !== run.pagePlan?.sourceManifestHash || patch.contentHash !== contentModel?.contentHash) return send(res, 409, { code: "STALE_REVISION" });
@@ -1441,8 +1501,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.build?.requiresPayloadBuild === true && !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const input = await readJson(req);
+        if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (candidate.payloadBuild?.passed === true) {
           if (previewSessions.has(input.qaPreviewId)) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
           const runtimePreview = payloadPreviewSessions.get(input.qaPreviewId);
@@ -1453,6 +1515,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!registered) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
         }
         const report = await quality.run({ ...input, candidateId: candidate.id, candidateHash: candidate.candidateHash });
+        if (latestCandidate(run)?.id !== candidate.id || !candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
         if (report.candidateId !== candidate.id || report.candidateHash !== candidate.candidateHash) {
           throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
         }
@@ -1482,7 +1545,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "STALE_CANDIDATE" ? 409 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" || error.code === "PAYLOAD_BUILD_NOT_CONFIGURED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code === "BUILD_GATE_REQUIRED" || error.code === "BUILD_FAILED" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "STALE_CANDIDATE" || error.code === "STALE_DESIGN_REVISION" ? 409 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" || error.code === "PAYLOAD_BUILD_NOT_CONFIGURED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code === "BUILD_GATE_REQUIRED" || error.code === "BUILD_FAILED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

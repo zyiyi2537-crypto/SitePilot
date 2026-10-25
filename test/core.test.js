@@ -158,6 +158,28 @@ test("design drafts are immutable and canvas patches are schema constrained", ()
   assert.throws(() => store.applyDesignPatch(updated.draft.id, { expectedDesignHash: updated.draft.designHash, operations: [{ op: "set_props", page: "home", componentId: "home:block_hero:0", props: JSON.parse('{"__proto__":{"polluted":true}}') }] }), /Invalid design property|executable markup/);
 });
 
+test("a new design revision supersedes candidates bound to the previous draft", () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "design revision binding" });
+  const run = store.createRun(project.id);
+  run.pagePlan = {
+    routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "r", commit: "a".repeat(40), path: "Hero.tsx" } }] }],
+  };
+  const firstDesign = store.createDesignDraft(run.id);
+  const candidate = store.createCandidate(run.id, { designDraftId: firstDesign.id, build: { passed: true } });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa_before_feedback" });
+  const nextDesign = store.applyDesignPatch(firstDesign.id, {
+    expectedDesignHash: firstDesign.designHash,
+    operations: [{ op: "set_props", page: "home", componentId: firstDesign.pageTree[0].components[0].instanceId, props: { density: "compact" } }],
+  }).draft;
+
+  assert.equal(candidate.status, "superseded");
+  assert.equal(candidate.supersededByDesignDraftId, nextDesign.id);
+  assert.throws(() => store.createCandidate(run.id, { designDraftId: firstDesign.id }), /stale design draft/);
+  assert.throws(() => store.markQuality(candidate.id, { passed: true, reportHash: "late_qa" }), /stale design revision/);
+  assert.throws(() => store.packageReview(candidate.id, { approvedByReviewer: "reviewer" }), /stale design draft/);
+});
+
 test("candidate cannot become draft before quality and review", () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "test", industry: "general" });

@@ -226,6 +226,7 @@ export class SitePilotStore {
     const run = this.runs.get(runId);
     if (!run) throw new PolicyError("Run not found", "RESOURCE_NOT_FOUND");
     if (run.status === "superseded") throw new PolicyError("Cannot design a superseded run", "POLICY_DENIED");
+    const previousDesignDraftId = run.designDraftId || null;
     const pageTree = normalizePageTree(input.pageTree || run.pagePlan?.routes);
     if (run.pagePlan) {
       const expected = new Map(run.pagePlan.routes.map((route) => [route.page, route]));
@@ -265,6 +266,29 @@ export class SitePilotStore {
     run.designDraftId = draft.id;
     run.checkpoint = "design_draft_ready";
     this.event(runId, "design-draft.created", { designDraftId: draft.id, designHash: draft.designHash, parentId: draft.parentId });
+    if (previousDesignDraftId) {
+      const supersededCandidateIds = [];
+      for (const candidateId of run.candidateIds || []) {
+        const candidate = this.candidates.get(candidateId);
+        if (!candidate || candidate.designDraftId !== previousDesignDraftId || candidate.status === "superseded") continue;
+        candidate.status = "superseded";
+        candidate.supersededByDesignDraftId = draft.id;
+        supersededCandidateIds.push(candidate.id);
+      }
+      run.contentModel = null;
+      run.codingPatch = null;
+      run.codePatchApproval = null;
+      run.codePatchExecution = null;
+      run.repairPatch = null;
+      run.repairExecution = null;
+      run.reviewDecision = null;
+      run.reviewCycle = null;
+      if (supersededCandidateIds.length) this.event(runId, "candidates.design-revision.superseded", {
+        designDraftId: previousDesignDraftId,
+        supersededByDesignDraftId: draft.id,
+        candidateIds: supersededCandidateIds,
+      });
+    }
     return draft;
   }
 
@@ -365,6 +389,7 @@ export class SitePilotStore {
       if (!design || design.runId !== runId) throw new PolicyError("Candidate design draft does not belong to run", "POLICY_DENIED");
     }
     const designDraftId = input.designDraftId || run.designDraftId || null;
+    if (run.designDraftId && designDraftId !== run.designDraftId) throw new PolicyError("Candidate is bound to a stale design draft", "STALE_REVISION");
     const design = designDraftId ? this.designs.get(designDraftId) : null;
     const codeArtifact = input.codeArtifact ? deepFreeze(clone(input.codeArtifact)) : null;
     const cmsSnapshot = input.cmsSnapshot ? deepFreeze(clone(input.cmsSnapshot)) : null;
@@ -427,6 +452,8 @@ export class SitePilotStore {
   markQuality(candidateId, quality) {
     const candidate = this.candidates.get(candidateId);
     if (!candidate) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
+    const run = this.runs.get(candidate.runId);
+    if (run?.designDraftId && candidate.designDraftId !== run.designDraftId) throw new PolicyError("Quality result belongs to a stale design revision", "STALE_REVISION");
     if (quality.candidateHash && quality.candidateHash !== candidate.candidateHash) throw new PolicyError("Quality result belongs to a stale candidate revision", "STALE_REVISION");
     candidate.quality = Object.freeze({ ...quality, candidateHash: candidate.candidateHash });
     candidate.status = quality.passed ? "quality_passed" : "quality_failed";
@@ -436,6 +463,8 @@ export class SitePilotStore {
   packageReview(candidateId, review) {
     const candidate = this.candidates.get(candidateId);
     if (!candidate) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
+    const run = this.runs.get(candidate.runId);
+    if (run?.designDraftId && candidate.designDraftId !== run.designDraftId) throw new PolicyError("Candidate is bound to a stale design draft", "STALE_REVISION");
     if (!candidate.quality?.passed) throw new PolicyError("Candidate has not passed quality gates", "SCHEMA_REJECTED");
     if (candidate.build?.requiresPayloadBuild === true && (!candidate.payloadBuild?.passed || candidate.payloadBuild.candidateHash !== candidate.candidateHash)) {
       throw new PolicyError("A real Payload sandbox build is required before packaging", "BUILD_GATE_REQUIRED");
