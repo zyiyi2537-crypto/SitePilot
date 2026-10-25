@@ -24,6 +24,29 @@ function notice(message, error = false) {
   target.classList.toggle("error", error);
 }
 
+function setActiveStage(stageId, scroll = false) {
+  for (const panel of document.querySelectorAll("[data-stage-panel]")) panel.hidden = panel.dataset.stagePanel !== stageId;
+  for (const button of document.querySelectorAll("[data-stage-target]")) {
+    const active = button.dataset.stageTarget === stageId;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "step");
+    else button.removeAttribute("aria-current");
+  }
+  if (scroll) document.getElementById(stageId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function syncStageProgress() {
+  const complete = {
+    "stage-intake": Boolean(runId),
+    "stage-plan": Boolean(currentRun?.strategy && currentRun?.pagePlan),
+    "stage-design": Boolean(designDraft),
+    "stage-delivery": Boolean(currentCandidate?.quality?.passed),
+  };
+  for (const button of document.querySelectorAll("[data-stage-target]")) {
+    button.classList.toggle("complete", complete[button.dataset.stageTarget] === true);
+  }
+}
+
 async function api(method, route, body, credential = "api") {
   const selector = credential === "reviewer" ? "#review-token" : credential === "l2" ? "#l2-token" : "#api-token";
   const token = $(selector).value.trim();
@@ -173,6 +196,8 @@ async function showRun() {
   $("#create-design").disabled = !run.pagePlan;
   renderDesignDraft();
   renderDelivery();
+  syncStageProgress();
+  setActiveStage(currentCandidate ? "stage-delivery" : designDraft ? "stage-design" : currentRun?.strategy ? "stage-plan" : "stage-intake");
 }
 
 function renderDelivery(result) {
@@ -476,8 +501,9 @@ $("#model-clear").onclick = () => action(async () => {
 $("#review-token-field").style.display = "none";
 $("#l2-token-field").style.display = "none";
 $("#refresh").onclick = () => action(async () => { await loadProjects(); await loadPayloadStatus(); });
-$("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
-$("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
+for (const button of document.querySelectorAll("[data-stage-target]")) button.onclick = () => setActiveStage(button.dataset.stageTarget, true);
+$("#tab-client").onclick = () => { $("#client-view").hidden = false; $("#review-view").hidden = true; document.body.classList.remove("review-mode"); $("#mode-label").textContent = "客户工作流"; $("#review-token-field").style.display = "none"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "true"); $("#tab-review").setAttribute("aria-selected", "false"); };
+$("#tab-review").onclick = () => { $("#client-view").hidden = true; $("#review-view").hidden = false; document.body.classList.add("review-mode"); $("#mode-label").textContent = "审核工作流"; $("#review-token-field").style.display = "grid"; $("#l2-token-field").style.display = "none"; $("#tab-client").setAttribute("aria-selected", "false"); $("#tab-review").setAttribute("aria-selected", "true"); action(loadReviews); };
 $("#research-form").onsubmit = (event) => { event.preventDefault(); action(async () => { if (!runId) throw new Error("请先选择项目 Run"); const result = await api("POST", `/runs/${encodeURIComponent(runId)}/research`, Object.fromEntries(new FormData(event.target))); $("#research-status").textContent = `${result.repository} @ ${result.commit}，${result.evidence.length} 条证据`; await showRun(); }); };
 $("#run-agents").onclick = () => action(async () => {
   if (!runId) throw new Error("请先选择项目 Run");
