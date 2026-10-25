@@ -29,3 +29,9 @@ Set distinct random values of at least 32 characters for `SITEPILOT_API_TOKEN`, 
 Leave all three `CODEATLAS_*` values empty when starting only the control plane; configure URL, token, and repository allowlist together before enabling live retrieval. Compose caps the API container at 384 MB and does not run Payload builds or browser QA.
 
 Docker is not installed in the current local development environment, so the Compose image and runtime have not been exercised here. The existing `ops/install.sh` and systemd deployment remain available for hosts that do not use Compose; populate both registry/evidence paths in the environment file before using that route.
+
+### Payload preview prerequisites
+
+Run `ops/configure-payload-preview.sh` as the administrator who owns the Payload source and Docker daemon. It verifies the exact commit in `sources/payload-website.lock.json`, requires a digest-pinned Node 24.15+ image with pnpm, and creates or validates a dedicated Docker network named by `SITEPILOT_PAYLOAD_PREVIEW_NETWORK`. The network must be `Internal=true` and carry the label `sitepilot.preview=true`.
+
+The script intentionally stops when the Docker socket, fixed Payload source, or reviewed image is missing. It never substitutes a mutable image tag, a host network, or an unpinned source checkout.
