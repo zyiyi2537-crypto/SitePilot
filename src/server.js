@@ -26,6 +26,7 @@ import { createPiModelRuntime, SitePilotAgentRuntime } from "./agent-runtime.js"
 import { createAgentToolRuntime, runCreationSupervisor } from "./agent-supervisor.js";
 import { JsonToolJournal, resolveToolJournalPath } from "./tool-runtime.js";
 import { applyUnifiedDiff, validateUnifiedDiff } from "./code-patch.js";
+import { bindGeneratedCandidateToPayloadWorktree } from "./payload-binding.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -261,6 +262,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const contentApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/content-approval$/);
       const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
       const codePatchExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-execution$/);
+      const candidatePayloadBuildMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-build$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
@@ -271,8 +273,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if ((generateMatch || codePatchExecutionMatch || reworkExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      if ((payloadPrepareMatch || payloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch) ? l2Token : apiToken;
+      if ((payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -738,6 +740,14 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!payloadBuild || !run.payloadWorktree) return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
           resource = path.resolve(payloadBuild.worktreeRoot, run.payloadWorktree.repositoryPathRef);
           planHash = PINNED_SOURCES.payloadWebsite.commit;
+        } else if (tool === "build_payload_candidate") {
+          if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
+          const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
+          if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
+          if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+          resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
+          planHash = candidate.candidateHash;
         } else if (tool === "apply_code_patch") {
           if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
@@ -796,6 +806,43 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         run.payloadTemplateBuild = report;
         store.event(run.id, "payload.template.built", { reportHash: report.build?.reportHash, templateCommit: report.sourceCommit });
         return send(res, 200, report);
+      }
+      if (req.method === "POST" && candidatePayloadBuildMatch) {
+        if (!payloadBuild) return send(res, 503, { code: "PAYLOAD_BUILD_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(candidatePayloadBuildMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (candidate.payloadBuild?.passed && candidate.payloadBuild.candidateHash === candidate.candidateHash) {
+          return send(res, 200, { candidate, build: candidate.payloadBuild, idempotent: true });
+        }
+        const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
+        if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+        const input = await readJson(req);
+        const resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
+        grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "build_payload_candidate", resource, planHash: candidate.candidateHash });
+        const report = typeof payloadBuild.buildCandidate === "function"
+          ? await payloadBuild.buildCandidate({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } })
+          : await payloadBuild.build({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } });
+        const reportCandidateHash = report?.candidateHash || candidate.candidateHash;
+        const passed = report?.passed === true || report?.build?.passed === true;
+        if (report?.candidateId && report.candidateId !== candidate.id || reportCandidateHash !== candidate.candidateHash) throw new PolicyError("Payload build report belongs to a different candidate", "STALE_REVISION");
+        if (!passed) throw new PolicyError("Payload sandbox build did not pass", "BUILD_FAILED");
+        const receipt = Object.freeze({
+          candidateId: candidate.id,
+          candidateHash: candidate.candidateHash,
+          passed: true,
+          reportHash: report?.reportHash || report?.build?.reportHash || crypto.createHash("sha256").update(JSON.stringify(report)).digest("hex"),
+          sourceCommit: report?.sourceCommit || payloadWorktree.baseCommit || null,
+          buildState: report?.buildState || "sandbox_build_passed",
+          report,
+          builtAt: new Date().toISOString(),
+        });
+        candidate.payloadBuild = receipt;
+        run.checkpoint = "payload_build_passed";
+        store.event(run.id, "payload.candidate.built", { candidateId: candidate.id, candidateHash: candidate.candidateHash, reportHash: receipt.reportHash, sourceCommit: receipt.sourceCommit });
+        store.persist?.();
+        return send(res, 201, { candidate, build: receipt });
       }
       const answersMatch = url.pathname.match(/^\/runs\/([^/]+)\/answers$/);
       if (req.method === "POST" && answersMatch) {
@@ -883,6 +930,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
         const designDraft = run.designDraftId ? store.designs.get(run.designDraftId) : null;
         if (!designDraft) return send(res, 422, { code: "DESIGN_DRAFT_REQUIRED" });
+        if (payloadBuild && !run.payloadWorktree) return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
         const previousCandidate = latestCandidate(run);
         if (previousCandidate?.designDraftId === designDraft.id || generatingRuns.has(run.id)) return send(res, 409, { code: "CANDIDATE_ALREADY_EXISTS" });
         for (const route of run.pagePlan.routes) for (const component of route.components) {
@@ -903,8 +951,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           grant: { level: "L2" },
           sourceResolver: (source) => codeAtlas.getCompleteFile({ ...source, expectedCommit: source.commit }),
         });
+        const payloadWorktree = payloadBuild
+          ? await bindGeneratedCandidateToPayloadWorktree({ sourceRoot: root, files: generated.files, payloadRoot: payloadBuild.worktreeRoot, payloadWorktree: run.payloadWorktree })
+          : null;
         const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
-        const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash }, build, sourceRefs: run.research?.evidence || [] });
+        const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash, ...(payloadWorktree ? { payloadWorktree } : {}) }, build: { ...build, requiresPayloadBuild: true, mode: payloadWorktree ? "payload-worktree-bound" : "static-scaffold" }, sourceRefs: run.research?.evidence || [] });
         run.checkpoint = "candidate_ready";
         store.persist?.();
         return send(res, 201, { candidate, generated, build });
@@ -984,11 +1035,12 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const newHead = crypto.createHash("sha256").update(JSON.stringify(outputManifest.sort((left, right) => left.path.localeCompare(right.path)))).digest("hex");
           const design = candidate.designDraftId ? store.designs.get(candidate.designDraftId) : null;
           const build = await validateGeneratedCandidate({ worktreeRoot: target, expectedDesignHash: design?.designHash || undefined });
+          const { payloadWorktree: _payloadWorktree, ...sourceCodeArtifact } = candidate.codeArtifact || {};
           const child = store.createCandidate(run.id, {
             parentId: candidate.id,
             designDraftId: candidate.designDraftId,
-            codeArtifact: { ...candidate.codeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, repairRound: repairRound + 1, designDraftId: candidate.designDraftId, designHash: design?.designHash || null },
-            build: { ...build, mode: "static-rebuild", passed: true },
+            codeArtifact: { ...sourceCodeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, repairRound: repairRound + 1, designDraftId: candidate.designDraftId, designHash: design?.designHash || null },
+            build: { ...build, mode: "static-rebuild", requiresPayloadBuild: candidate.build?.requiresPayloadBuild === true, passed: true },
             sourceRefs: candidate.sourceRefs,
           });
           candidate.status = "superseded";
@@ -1066,7 +1118,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           }
           const newHead = crypto.createHash("sha256").update(JSON.stringify(outputManifest.sort((left, right) => left.path.localeCompare(right.path)))).digest("hex");
           const build = await validateGeneratedCandidate({ worktreeRoot: target, expectedDesignHash: design?.designHash || undefined });
-          const child = store.createCandidate(run.id, { parentId: candidate.id, designDraftId: candidate.designDraftId, codeArtifact: { ...candidate.codeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, designDraftId: candidate.designDraftId, designHash: design?.designHash || null }, build: { ...build, mode: "static-rebuild", passed: true }, sourceRefs: candidate.sourceRefs });
+          const { payloadWorktree: _payloadWorktree, ...sourceCodeArtifact } = candidate.codeArtifact || {};
+          const child = store.createCandidate(run.id, { parentId: candidate.id, designDraftId: candidate.designDraftId, codeArtifact: { ...sourceCodeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, designDraftId: candidate.designDraftId, designHash: design?.designHash || null }, build: { ...build, mode: "static-rebuild", requiresPayloadBuild: candidate.build?.requiresPayloadBuild === true, passed: true }, sourceRefs: candidate.sourceRefs });
           candidate.status = "superseded";
           const oldContent = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
           if (oldContent) {
@@ -1279,7 +1332,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" || error.code === "PAYLOAD_BUILD_NOT_CONFIGURED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code === "BUILD_GATE_REQUIRED" || error.code === "BUILD_FAILED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

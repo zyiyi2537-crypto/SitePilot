@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { Readable } from "node:stream";
 import fs from "node:fs/promises";
+import path from "node:path";
 
 import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
@@ -15,6 +16,7 @@ import { validateGeneratedCandidate } from "../src/local-build.js";
 import { FixtureCodeAtlasTransport, CodeAtlasMcpAdapter } from "../src/codeatlas.js";
 import { BlockRegistry } from "../src/registry.js";
 import { validateDeploymentConfig } from "../src/deployment-config.js";
+import { GrantStore } from "../src/grants.js";
 
 function request(server, method, url, token, body) {
   return new Promise((resolve, reject) => {
@@ -376,6 +378,52 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test("generation binds a candidate into the prepared Payload worktree", async () => {
+  const store = new SitePilotStore();
+  const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer-1" };
+  const registry = new BlockRegistry();
+  const commit = "d".repeat(40);
+  const block = registry.register({ name: "Hero", kind: "hero", repository: "payload", commit, path: "src/Hero.tsx", license: "MIT", supportedLocales: ["en"] });
+  registry.transition(block.id, "approved", { reviewerId: "reviewer", licenseVerified: true, testsPassed: true });
+  const codeAtlas = { getCompleteFile: async (source) => ({ ...source, content: "export default function Hero() {}" }) };
+  const generationRoot = await fs.mkdtemp("/tmp/sitepilot-payload-bound-generation-");
+  const payloadRoot = await fs.mkdtemp("/tmp/sitepilot-payload-bound-worktree-");
+  const project = store.createProject({ goal: "website", audience: "buyers", primaryConversion: "contact" });
+  const run = store.createRun(project.id);
+  run.strategy = { locales: ["en"], pageHierarchy: ["home"], blocks: ["Hero"] };
+  const repositoryPathRef = `${project.id}/${run.id}/worktree`;
+  const pathRef = `${repositoryPathRef}/templates/website`;
+  await fs.mkdir(path.join(payloadRoot, pathRef), { recursive: true });
+  run.payloadWorktree = { baseCommit: "e".repeat(40), repositoryPathRef, pathRef, worktreeId: "worktree_test" };
+  const buildCalls = [];
+  const payloadBuild = {
+    worktreeRoot: payloadRoot,
+    build: async (input) => {
+      buildCalls.push(input);
+      return { candidateId: input.candidateId, candidateHash: input.candidateHash, sourceCommit: input.worktree.baseCommit, build: { passed: true, reportHash: "payload-bound-build" } };
+    },
+  };
+  const server = createServer(store, auth, undefined, registry, codeAtlas, null, null, { worktreeRoot: generationRoot }, undefined, payloadBuild);
+  assert.equal((await request(server, "POST", `/runs/${run.id}/page-plan`, auth.apiToken, {})).status, 200);
+  const design = await request(server, "POST", `/runs/${run.id}/design-drafts`, auth.apiToken, {});
+  assert.equal(design.status, 201);
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "generate_candidate", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const generated = await request(server, "POST", `/runs/${run.id}/generate`, auth.l2Token, { grantId: grant.body.id });
+  assert.equal(generated.status, 201, JSON.stringify(generated.body));
+  const candidate = generated.body.candidate;
+  assert.equal(candidate.build.mode, "payload-worktree-bound");
+  assert.equal(candidate.codeArtifact.payloadWorktree.repositoryPathRef, repositoryPathRef);
+  assert.ok(candidate.codeArtifact.payloadWorktree.sourceManifestHash);
+  assert.ok(await fs.stat(path.join(payloadRoot, pathRef, "src/app/(frontend)/page.tsx")));
+  assert.ok(await fs.stat(path.join(payloadRoot, pathRef, "src/generated/sitepilot-candidate-binding.json")));
+  const buildGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_candidate", candidateId: candidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const built = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: buildGrant.body.id });
+  assert.equal(built.status, 201, JSON.stringify(built.body));
+  assert.equal(buildCalls[0].candidateHash, candidate.candidateHash);
+  await fs.rm(generationRoot, { recursive: true, force: true });
+  await fs.rm(payloadRoot, { recursive: true, force: true });
+});
+
 test("generation binds candidates to the latest design revision", async () => {
   const store = new SitePilotStore();
   const token = "a".repeat(32);
@@ -471,6 +519,83 @@ test("Payload worktree and build actions require scoped single-use L2 grants", a
   assert.equal((await request(server, "POST", `/runs/${run.id}/payload-build`, auth.l2Token, { grantId: buildGrant.body.id })).status, 200);
   assert.equal((await request(server, "POST", `/runs/${run.id}/payload-build`, auth.l2Token, { grantId: buildGrant.body.id })).status, 422);
   assert.deepEqual(calls.map(([name]) => name), ["prepare", "build"]);
+});
+
+test("candidate Payload builds are hash-bound, isolated and required for packaging", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "website" });
+  const run = store.createRun(project.id);
+  const root = "/tmp/sitepilot-payload-candidate-api-test";
+  const commit = "31ba7ee8271998ad7aa8963111764cbacf37b157";
+  const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer" };
+  let buildCalls = 0;
+  let buildMode = "pass";
+  const payloadBuild = {
+    worktreeRoot: root,
+    build: async ({ candidateId, candidateHash }) => {
+      buildCalls += 1;
+      if (buildMode === "fail") return { candidateId, candidateHash, sourceCommit: commit, build: { passed: false, reportHash: "failed-report" } };
+      return { candidateId, candidateHash, sourceCommit: commit, build: { passed: true, reportHash: "passed-report" } };
+    },
+  };
+  const grants = new GrantStore();
+  const server = createServer(store, auth, undefined, undefined, null, null, null, null, grants, payloadBuild);
+  const makeCandidate = () => store.createCandidate(run.id, {
+    codeArtifact: { payloadWorktree: { baseCommit: commit, repositoryPathRef: `${project.id}/${run.id}/worktree` } },
+    build: { passed: true, requiresPayloadBuild: true, mode: "static-scaffold" },
+  });
+  const missingWorktree = store.createCandidate(run.id, { build: { passed: true, requiresPayloadBuild: true } });
+  const noWorktree = await request(server, "POST", `/candidates/${missingWorktree.id}/payload-build`, auth.l2Token, { grantId: "missing" });
+  assert.equal(noWorktree.status, 422);
+  assert.equal(noWorktree.body.code, "PAYLOAD_WORKTREE_REQUIRED");
+
+  const candidate = makeCandidate();
+  assert.equal((await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.apiToken, { grantId: "missing" })).status, 401);
+  assert.equal((await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: "missing" })).body.code, "GRANT_REQUIRED");
+
+  const resource = `${root}/${project.id}/${run.id}/worktree`;
+  const wrongTool = grants.issue({ projectId: project.id, runId: run.id, tool: "build_payload_template", resource, planHash: commit, expiresAt: new Date(Date.now() + 60_000).toISOString(), issuedBy: auth.reviewerId });
+  const wrongToolUse = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: wrongTool.id });
+  assert.equal(wrongToolUse.status, 422);
+  assert.equal(wrongToolUse.body.code, "GRANT_SCOPE_MISMATCH");
+
+  const wrongHash = grants.issue({ projectId: project.id, runId: run.id, tool: "build_payload_candidate", resource, planHash: "wrong-candidate-hash", expiresAt: new Date(Date.now() + 60_000).toISOString(), issuedBy: auth.reviewerId });
+  const wrongHashUse = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: wrongHash.id });
+  assert.equal(wrongHashUse.status, 422);
+  assert.equal(wrongHashUse.body.code, "GRANT_SCOPE_MISMATCH");
+  assert.equal(buildCalls, 0);
+
+  const gate = () => store.packageReview(candidate.id, { approvedByReviewer: auth.reviewerId });
+  store.markQuality(candidate.id, { passed: true, reportHash: "qa-report" });
+  assert.throws(gate, (error) => error.code === "BUILD_GATE_REQUIRED");
+
+  const grant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_candidate", candidateId: candidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(grant.status, 201);
+  assert.equal(grant.body.planHash, candidate.candidateHash);
+  const built = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: grant.body.id });
+  assert.equal(built.status, 201, JSON.stringify(built.body));
+  assert.equal(built.body.build.passed, true);
+  assert.equal(built.body.build.candidateHash, candidate.candidateHash);
+  assert.equal(store.candidates.get(candidate.id).payloadBuild.candidateHash, candidate.candidateHash);
+  assert.equal(buildCalls, 1);
+
+  const replay = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: grant.body.id });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.body.idempotent, true);
+  assert.equal(buildCalls, 1);
+  assert.equal(store.packageReview(candidate.id, { approvedByReviewer: auth.reviewerId }).status, "ready_for_review");
+
+  buildMode = "fail";
+  const failedCandidate = makeCandidate();
+  const failedGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_candidate", candidateId: failedCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const failed = await request(server, "POST", `/candidates/${failedCandidate.id}/payload-build`, auth.l2Token, { grantId: failedGrant.body.id });
+  assert.equal(failed.status, 422);
+  assert.equal(failed.body.code, "BUILD_FAILED");
+  assert.equal(store.candidates.get(failedCandidate.id).payloadBuild, null);
+
+  const stale = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: "missing" });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.code, "STALE_CANDIDATE");
 });
 
 test("evidence API records sources, citations and claims under the project", async () => {

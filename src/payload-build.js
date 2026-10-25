@@ -9,6 +9,7 @@ import { PolicyError } from "./core.js";
 import { TemplateSnapshotVerifier } from "./template-verifier.js";
 import { ProjectWorktreeManager } from "./worktree.js";
 import { BuildExecutor, DockerSandboxRunner, LockedDependencyInstaller } from "./build-executor.js";
+import { verifyPayloadCandidateBinding } from "./payload-binding.js";
 
 const execFile = promisify(nodeExecFile);
 
@@ -33,7 +34,7 @@ export class PayloadBuildPipeline {
     return Object.freeze({ ...worktree, sourceId: lock.sourceId, templateManifestHash: verified.manifestHash, buildState: "prepared_not_built" });
   }
 
-  async build({ candidateId, worktree, grant } = {}) {
+  async build({ candidateId, candidateHash, worktree, grant } = {}) {
     if (grant?.level !== "L2") throw new PolicyError("Payload build requires L2", "POLICY_DENIED");
     if (!worktree || worktree.baseCommit !== lock.commit || typeof worktree.repositoryPathRef !== "string") throw new PolicyError("Build requires a pinned Payload worktree", "STALE_REVISION");
     const sandbox = new DockerSandboxRunner({ image: this.image, runner: this.runner });
@@ -47,6 +48,7 @@ export class PayloadBuildPipeline {
     if (!worktreeList.split(/\n(?=worktree )/).some((entry) => entry.split("\n", 1)[0] === `worktree ${actualProject}`)) {
       throw new PolicyError("Payload worktree is not registered by the pinned source", "STALE_REVISION");
     }
+    if (candidateHash) await verifyPayloadCandidateBinding({ payloadRoot: root, payloadWorktree: worktree });
     const lockPath = path.resolve(projectRoot, "pnpm-lock.yaml");
     const actualLock = await fs.realpath(lockPath);
     if (!actualLock.startsWith(`${actualProject}${path.sep}`)) throw new PolicyError("Payload lockfile escapes worktree root", "POLICY_DENIED");

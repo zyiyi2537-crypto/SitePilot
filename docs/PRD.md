@@ -22,6 +22,7 @@
 | 0.8 | 2026-10-24 | 接入可选的服务端自然语言需求解析、需求草稿确认和原文引用校验；模型输出未通过验证时拒绝创建项目 | 项目作者 |
 | 0.9 | 2026-10-24 | 明确 SitePilot Supervisor 与专业子 Agent 的真实运行时边界；接入 Pi Agent Core/AI，先落地 Supervisor→Architect→Research 首条动态闭环和持久化 Artifact | 项目作者 |
 | 1.0 | 2026-10-24 | 记录首条 Pi 多 Agent 创建闭环的实现状态、测试边界及后续角色扩展顺序 | 项目作者 |
+| 1.1 | 2026-10-25 | 增加候选级 Payload worktree 绑定、来源清单漂移检测、真实构建回执和打包硬门禁；明确未配置隔离构建时仍只能称为静态 scaffold | 项目作者 |
 
 ## 1. 一句话定义
 
@@ -52,6 +53,8 @@ SitePilot 是一个面向 ToB/ToC 官网定制交付的证据驱动多代理工�
 Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.tsx` 从 `pages` collection 读取 `hero` 和 `layout`，由 `RenderHero`/`RenderBlocks` 渲染。V0 默认保留这些路由与组件，不把 CodeAtlas 文件片段直接拼成可执行 TSX，也不以静态页面占位符代替 CMS 数据。SitePilot 在校验源码锁与许可证后创建项目专属 Git worktree；将客户事实映射为 Payload `pages` 的 draft 操作（包括 slug、title、hero、layout、meta、locale 和 Claim 引用），从沙箱 API 获取 CMS snapshot receipt。只有模板缺少经审核的能力时，Coding Agent 才在白名单路径增补组件、Schema 或测试，并记录补丁 hash 与来源。
 
 可交付预览必须使用该 worktree 和对应 CMS snapshot 在隔离环境运行；先锁定依赖、执行类型检查/构建/单测，再以固定 candidate hash 启动测试预览，完成桌面/移动 Playwright、链接、SEO、表单、语言与必要的人工视觉检查。Node 24.15+、pnpm 锁文件和固定镜像是 Payload 基线的构建前提。没有 Docker/等价隔离运行器、锁定依赖或沙箱 CMS 时只返回 blocked/needs_input，不回退宿主执行，不把 manifest 一致性检查、结构性预览或 Mock 结果称为真实构建。正式 DraftVersion 仅在构建、QA、来源审查及独立 Review 通过后创建。
+
+候选级构建使用 `POST /candidates/:id/payload-build`。候选必须携带 `codeArtifact.payloadWorktree`（固定 base commit 和服务端相对路径），并由 reviewer 为 `build_payload_candidate` 签发一次性 L2 grant；grant 同时绑定 project、run、candidate hash 和 worktree 路径。构建回执单独保存并再次核对 `candidateId`、`candidateHash`、来源提交和 `passed`，不修改候选 hash；同一成功回执可幂等重放，失败只记录错误，不创建 child candidate，也不移动稳定预览。`build.requiresPayloadBuild` 为真时，`packageReview` 必须看到匹配的成功回执，否则返回 `BUILD_GATE_REQUIRED`。配置 Payload 构建器并先准备 run worktree 后，生成流程只把允许的路由、manifest 和来源清单写入模板项目，并保存候选绑定清单；构建阶段会重新核对清单和文件 hash。未配置该适配器或未准备 worktree 时，生成仍是静态 scaffold，不能称为真实 Payload 工程。
 
 ### 自然语言需求到前端代码与预览主流程（创建模式主线）
 
@@ -1326,7 +1329,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 
 接下来的项目按“先贯通一条客户可见的创建闭环，再扩大到生产与维护”推进。自然语言建站是当前产品主线；`cms-agent-platform-plan.md` 提供维护模式和共享工程内核的设计，不要求首轮同时交付 GitHub Issue 自动修复、PostHog、自托管整套监控或自动 PR。
 
-当前代码进度按 **PRD Draft 0.6** 推进；Draft 0.7 新增的是下一轮产品要求，不能把 0.7 的计划功能记成已实现。
+当前代码进度按 **PRD Draft 1.1** 推进；候选级 Payload worktree 绑定和构建门禁已实现，真实 Docker 构建、QA 和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
 
 | 能力 | 当前经仓库/CI 记录的状态 | 本次迭代判断 |
 |---|---|---|
@@ -1334,7 +1337,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
 | 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板 | 接通受审组件到初步页面预览，并验证客户反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
-| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。执行后静态校验创建 child CandidateRevision，原候选和 worktree 不变，子候选内容需重新审核。尚无真实在线模型多角色运行记录 | 接入真实隔离构建/Docker、失败重建与补丁回滚，再接 QA 与独立 Review |
+| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。候选级 Payload 构建接口已要求绑定 worktree、candidate hash 和一次性 `build_payload_candidate` grant，生成阶段会写入受控 Payload 文件并生成漂移检测清单，成功回执才允许 `packageReview`。尚无真实在线模型多角色运行记录 | 用真实 Docker/固定镜像跑通该绑定候选，再接 QA 与独立 Review |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |

@@ -377,7 +377,7 @@ export class SitePilotStore {
       id: id("candidate"), runId, status: "candidate", parentId,
       designDraftId,
       codeArtifact, cmsSnapshot, build,
-      sourceRefs, quality: null, review: null,
+      sourceRefs, quality: null, payloadBuild: null, review: null,
       candidateHash,
       revision: Object.freeze({
         parentCandidateId: parentId,
@@ -437,6 +437,9 @@ export class SitePilotStore {
     const candidate = this.candidates.get(candidateId);
     if (!candidate) throw new PolicyError("Candidate not found", "RESOURCE_NOT_FOUND");
     if (!candidate.quality?.passed) throw new PolicyError("Candidate has not passed quality gates", "SCHEMA_REJECTED");
+    if (candidate.build?.requiresPayloadBuild === true && (!candidate.payloadBuild?.passed || candidate.payloadBuild.candidateHash !== candidate.candidateHash)) {
+      throw new PolicyError("A real Payload sandbox build is required before packaging", "BUILD_GATE_REQUIRED");
+    }
     if (!review?.approvedByReviewer) throw new PolicyError("Review decision is required", "POLICY_DENIED");
     if (candidate.codeArtifact?.files?.length) {
       const independent = candidate.independentReview;

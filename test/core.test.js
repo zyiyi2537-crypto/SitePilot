@@ -29,6 +29,7 @@ import { researchComponents } from "../src/research-agent.js";
 import { materializePagePlan } from "../src/code-generator.js";
 import { runLocalCodePipeline } from "../src/local-pipeline.js";
 import { GrantStore, SqliteGrantStore } from "../src/grants.js";
+import { bindGeneratedCandidateToPayloadWorktree, verifyPayloadCandidateBinding } from "../src/payload-binding.js";
 
 test("tool journal configuration requires explicit absolute paths and derives durable store paths", () => {
   assert.throws(() => resolveToolJournalPath({ explicitPath: "logs/tools.json" }), /must be absolute/);
@@ -513,6 +514,35 @@ test("code generator records frozen CodeAtlas source files", async () => {
   await materializePagePlan({ plan, grant: { level: "L2" }, worktree: { applyPatch: async (files) => { Object.assign(writes, files); return { files: Object.keys(files) }; } }, sourceResolver: async () => ({ repository: "payload", commit, path: "src/Hero.tsx", content: "export default function Hero() {}" }) });
   assert.ok(writes["src/generated/sources/payload-src_Hero.tsx"]);
   assert.match(writes["src/generated/sitepilot-manifest.json"], /"sources"/);
+});
+
+test("Payload candidate binding copies only approved generated files and detects drift", async () => {
+  const sourceRoot = await fs.mkdtemp("/tmp/sitepilot-binding-source-");
+  const payloadRoot = await fs.mkdtemp("/tmp/sitepilot-binding-payload-");
+  const repositoryPathRef = "project_1/run_1/worktree_1";
+  const projectPathRef = `${repositoryPathRef}/templates/website`;
+  await fs.mkdir(path.join(sourceRoot, "src/app/(frontend)"), { recursive: true });
+  await fs.mkdir(path.join(sourceRoot, "src/generated"), { recursive: true });
+  await fs.mkdir(path.join(payloadRoot, projectPathRef), { recursive: true });
+  await fs.writeFile(path.join(sourceRoot, "src/app/(frontend)/page.tsx"), "export default function Home() { return null; }\n");
+  await fs.writeFile(path.join(sourceRoot, "src/generated/sitepilot-manifest.json"), "{\"routes\":[]}\n");
+  await fs.writeFile(path.join(sourceRoot, "SOURCES.md"), "- fixed\n");
+  await fs.writeFile(path.join(sourceRoot, "src/generated/untrusted.js"), "throw new Error('must not copy');\n");
+  const bound = await bindGeneratedCandidateToPayloadWorktree({
+    sourceRoot,
+    files: ["src/app/(frontend)/page.tsx", "src/generated/sitepilot-manifest.json", "src/generated/untrusted.js", "SOURCES.md"],
+    payloadRoot,
+    payloadWorktree: { baseCommit: "a".repeat(40), repositoryPathRef, pathRef: projectPathRef },
+  });
+  assert.equal(bound.boundFiles.length, 3);
+  assert.ok(bound.bindingManifestPath.endsWith("src/generated/sitepilot-candidate-binding.json"));
+  const manifest = await verifyPayloadCandidateBinding({ payloadRoot, payloadWorktree: bound });
+  assert.equal(manifest.sourceManifestHash, bound.sourceManifestHash);
+  await assert.rejects(() => fs.access(path.join(payloadRoot, projectPathRef, "src/generated/untrusted.js")));
+  await fs.appendFile(path.join(payloadRoot, projectPathRef, "src/app/(frontend)/page.tsx"), "// drift\n");
+  await assert.rejects(() => verifyPayloadCandidateBinding({ payloadRoot, payloadWorktree: bound }), /changed/);
+  await fs.rm(sourceRoot, { recursive: true, force: true });
+  await fs.rm(payloadRoot, { recursive: true, force: true });
 });
 
 test("local pipeline stops for review and generates after approved evidence", async () => {
