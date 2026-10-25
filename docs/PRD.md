@@ -1,10 +1,10 @@
 # SitePilot 产品需求文档（PRD）
 
-> 文档状态：Draft 1.0
+> 文档状态：Draft 1.2
 > 产品阶段：本地开发中；本文数字均为目标，除非标记 Result
 > 目标用户：官网交付项目负责人、交付工程师、内容/质量审阅人  
 > 文档读者：项目作者、潜在协作者、Agent/RAG 岗位面试官  
-> 更新时间：2026-10-24
+> 更新时间：2026-10-25
 > 产品代号：SitePilot  
 > 数据原则：只使用公开开源代码、公开文档和虚构客户资料；严禁导入或复刻任职公司的模板、组件、CMS、客户代码、设计稿、埋点或内部文档。
 
@@ -23,6 +23,7 @@
 | 0.9 | 2026-10-24 | 明确 SitePilot Supervisor 与专业子 Agent 的真实运行时边界；接入 Pi Agent Core/AI，先落地 Supervisor→Architect→Research 首条动态闭环和持久化 Artifact | 项目作者 |
 | 1.0 | 2026-10-24 | 记录首条 Pi 多 Agent 创建闭环的实现状态、测试边界及后续角色扩展顺序 | 项目作者 |
 | 1.1 | 2026-10-25 | 增加候选级 Payload worktree 绑定、来源清单漂移检测、真实构建回执和打包硬门禁；明确未配置隔离构建时仍只能称为静态 scaffold | 项目作者 |
+| 1.2 | 2026-10-25 | 补齐 Studio 受控自然语言设计反馈、不可变版本历史与字段差异摘要；反馈服务端仅转换为白名单 CanvasPatch，不识别的要求停在澄清 | 项目作者 |
 
 ## 1. 一句话定义
 
@@ -1329,13 +1330,13 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 
 接下来的项目按“先贯通一条客户可见的创建闭环，再扩大到生产与维护”推进。自然语言建站是当前产品主线；`cms-agent-platform-plan.md` 提供维护模式和共享工程内核的设计，不要求首轮同时交付 GitHub Issue 自动修复、PostHog、自托管整套监控或自动 PR。
 
-当前代码进度按 **PRD Draft 1.1** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：配置管理员创建带 `Internal=true` 且带 `sitepilot.preview=true` 标签的专用 Docker 网络后，L2-only `POST /candidates/:id/payload-preview/start` 会在只读、资源受限容器中启动当前候选，探测 Payload 身份端点后生成短期 opaque preview ID 并由 Playwright 校验候选 hash；`DELETE /candidates/:id/payload-preview` 可停止 lease。仍保留手工登记 loopback runner 的兼容接口。预览接口不提供公网 URL、不允许发布和写入。真实 Docker 构建、依赖缓存、持久化客户预览服务和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
+当前代码进度按 **PRD Draft 1.2** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的设计入口支持隔离只读 iframe、页面/视口切换、不可变设计版本历史和相对父版本的字段差异摘要；客户可以提交受控自然语言反馈（标题、描述、按钮文案、主色、全站留白），服务端只把可识别表达转换成白名单 `CanvasPatch`，不识别的要求停在澄清，旧版本不能继续反馈或生成候选。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：配置管理员创建带 `Internal=true` 且带 `sitepilot.preview=true` 标签的专用 Docker 网络后，L2-only `POST /candidates/:id/payload-preview/start` 会在只读、资源受限容器中启动当前候选，探测 Payload 身份端点后生成短期 opaque preview ID 并由 Playwright 校验候选 hash；`DELETE /candidates/:id/payload-preview` 可停止 lease。仍保留手工登记 loopback runner 的兼容接口。预览接口不提供公网 URL、不允许发布和写入。真实 Docker 构建、依赖缓存、持久化客户预览服务和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
 
 | 能力 | 当前经仓库/CI 记录的状态 | 本次迭代判断 |
 |---|---|---|
 | SitePilot 项目/运行/候选/审批、CodeAtlas 只读适配器、来源锁定、受限代码 worktree、Payload 草稿 adapter | 已有实现或 adapter；真实服务配置与完整产品链路仍需单独验收 | 作为共享底座继续复用 |
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
-| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板 | 接通受审组件到初步页面预览，并验证客户反馈迭代 |
+| 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板；Studio 已支持版本历史、字段差异摘要和受控自然语言反馈到 CanvasPatch | 接通受审组件到初步页面预览，并验证真实候选反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
 | Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。候选级 Payload 构建接口已要求绑定 worktree、candidate hash 和一次性 `build_payload_candidate` grant，生成阶段会写入受控 Payload 文件并生成漂移检测清单，成功回执才允许 `packageReview`。尚无真实在线模型多角色运行记录 | 用真实 Docker/固定镜像跑通该绑定候选，再接 QA 与独立 Review |
 | Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
@@ -1356,8 +1357,8 @@ CI 合成数据成功、代码模块存在或结构检查通过，均不等于�
 - 用 Hero、ProductGrid、ContactForm 等已审查区块生成 `DesignDraft`，并在 Studio 的隔离只读 iframe 中按同一组登记区块渲染设计方向；
 - 设计预览支持页面切换、桌面/平板/手机视口、组件目标选择和色板/间距摘要；客户文本必须转义，预览不加载脚本、不提交表单、不执行外部组件源码；
 - 对 Puck 做隔离技术验证：核验许可证、React/Next 兼容、受限区块渲染、序列化/恢复、Payload schema 映射与样式复用；验证通过才作为正式画布依赖，否则用轻量受控页面预览保持产品进度；
-- 画布/自然语言修改只生成 schema 校验过的 `CanvasPatch`，不执行任意 HTML/JS、不直接落盘源码；
-- 设计草稿版本、目标版本和证据版本冻结，可比较并复现。
+- 画布/自然语言修改只生成 schema 校验过的 `CanvasPatch`，不执行任意 HTML/JS、不直接落盘源码；当前自然语言解释器只覆盖可审计的文案、主色和全站间距词汇，超出范围必须澄清；
+- 设计草稿版本、目标版本和证据版本冻结，可在 Studio 回看、比较并复现；只有当前版本可继续反馈。
 
 出口标准：从一条自然语言需求生成首页草稿；桌面、平板和手机方向预览由同一组登记区块渲染；客户能提出至少一次自然语言修改，产生新的可审阅 `DesignDraft` 和差异；缺失产品参数不被编造；设计预览与最终 Payload 候选的边界清晰；Puck 或替代方案选择有许可、兼容性和复现证据。
 

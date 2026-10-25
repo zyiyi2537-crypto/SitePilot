@@ -5,6 +5,8 @@ const node = (tag, text, className) => { const item = document.createElement(tag
 let projectId = null;
 let runId = null;
 let designDraft = null;
+let designHistory = [];
+let viewedDesignDraftId = null;
 let currentRun = null;
 let currentCandidate = null;
 let currentPreview = null;
@@ -92,6 +94,7 @@ async function selectProject(id, reloadList = true) {
   projectId = id;
   const { runs } = await api("GET", `/projects/${encodeURIComponent(id)}/runs`);
   runId = runs.at(-1)?.id || null;
+  viewedDesignDraftId = null;
   if (reloadList) await loadProjects();
   await showRun();
 }
@@ -121,7 +124,10 @@ async function showRun() {
   }
   $("#run-agents").disabled = !run.strategy || run.status === "superseded";
   const designResult = await api("GET", `/runs/${encodeURIComponent(runId)}/design-drafts`);
-  designDraft = designResult.designs.at(-1) || null;
+  const previousCurrentDesignId = designDraft?.id || null;
+  designHistory = designResult.designs || [];
+  designDraft = designHistory.at(-1) || null;
+  if (previousCurrentDesignId !== designDraft?.id || !designHistory.some((draft) => draft.id === viewedDesignDraftId)) viewedDesignDraftId = designDraft?.id || null;
   const { candidates } = await api("GET", "/candidates");
   currentCandidate = run.candidateIds?.length ? candidates.find((candidate) => candidate.id === run.candidateIds.at(-1)) || null : null;
   const selectedCandidateHash = currentCandidate?.candidateHash || null;
@@ -247,14 +253,30 @@ function renderDesignDraft() {
     status.textContent = "页面计划生成后创建首版设计。";
     target.textContent = "设计草稿会在这里显示。";
     feedback.hidden = true;
+    $("#design-version").replaceChildren();
+    $("#design-diff").replaceChildren();
     return;
   }
-  const pages = designDraft.pageTree || [];
+  const viewedDraft = designHistory.find((draft) => draft.id === viewedDesignDraftId) || designDraft;
+  const viewedIndex = designHistory.findIndex((draft) => draft.id === viewedDraft.id);
+  const isCurrentDraft = viewedDraft.id === designDraft.id;
+  const pages = viewedDraft.pageTree || [];
   if (!pages.some((page) => page.page === selectedDesignPage)) selectedDesignPage = pages[0]?.page || "";
   const page = pages.find((item) => item.page === selectedDesignPage) || pages[0];
   if (!page) return;
-  const revision = Math.max(1, (currentRun?.designDraftIds || []).indexOf(designDraft.id) + 1);
-  status.textContent = `版本 ${revision} · hash ${designDraft.designHash.slice(0, 12)} · ${designDraft.openQuestions.length} 个待确认项${designDraft.parentId ? ` · 基于 ${designDraft.parentId}` : ""}`;
+  const revision = Math.max(1, viewedIndex + 1);
+  status.textContent = `版本 ${revision}${isCurrentDraft ? " · 当前版本" : " · 历史只读"} · hash ${viewedDraft.designHash.slice(0, 12)} · ${viewedDraft.openQuestions.length} 个待确认项${viewedDraft.parentId ? ` · 基于版本 ${designHistory.findIndex((draft) => draft.id === viewedDraft.parentId) + 1}` : ""}`;
+
+  const versionSelect = $("#design-version");
+  versionSelect.replaceChildren();
+  designHistory.forEach((draft, index) => {
+    const option = node("option", `版本 ${index + 1}${draft.id === designDraft.id ? " · 当前" : ""} · ${draft.designHash.slice(0, 8)}`);
+    option.value = draft.id;
+    option.selected = draft.id === viewedDraft.id;
+    versionSelect.append(option);
+  });
+  versionSelect.onchange = () => { viewedDesignDraftId = versionSelect.value; renderDesignDraft(); };
+  renderDesignDiff(viewedDraft, revision);
 
   const preview = node("div", undefined, "design-preview-layout");
   const canvas = node("div", undefined, "design-preview-canvas");
@@ -278,7 +300,7 @@ function renderDesignDraft() {
   const frame = node("iframe"); frame.id = "design-preview-frame"; frame.className = `design-preview-frame ${designViewport}`; frame.title = `${page.page} 设计预览`; frame.setAttribute("sandbox", "");
   const locale = currentRun?.inputSnapshot?.locale?.[0] || "zh-CN";
   const documentHtml = renderDesignPreviewDocument({
-    designDraft,
+    designDraft: viewedDraft,
     page: page.page,
     locale,
     industry: currentRun?.inputSnapshot?.industry,
@@ -286,7 +308,7 @@ function renderDesignDraft() {
     primaryConversion: currentRun?.strategy?.primaryConversion,
     businessGoal: currentRun?.strategy?.businessGoal,
   });
-  const stylesheetUrl = `data:text/css;charset=utf-8,${encodeURIComponent(renderDesignPreviewStylesheet({ designDraft }))}`;
+  const stylesheetUrl = `data:text/css;charset=utf-8,${encodeURIComponent(renderDesignPreviewStylesheet({ designDraft: viewedDraft }))}`;
   const previewHtml = documentHtml.replace("__SITEPILOT_PREVIEW_STYLESHEET__", stylesheetUrl);
   const nextUrl = URL.createObjectURL(new Blob([previewHtml], { type: "text/html;charset=utf-8" }));
   const currentUrls = new Set([nextUrl]);
@@ -298,7 +320,7 @@ function renderDesignDraft() {
   stage.append(frame); canvas.append(toolbar, stage);
 
   const sidebar = node("aside", undefined, "design-preview-sidebar");
-  const tokens = designDraft.designTokens || {};
+  const tokens = viewedDraft.designTokens || {};
   const summary = node("section", undefined, "design-summary");
   summary.append(node("strong", "视觉方向"), node("p", currentRun?.strategy?.designDirection || "等待视觉方向"));
   const palette = node("div", undefined, "design-palette");
@@ -314,9 +336,9 @@ function renderDesignDraft() {
   const list = node("ol");
   for (const component of page.components) list.append(node("li", component.name));
   outline.append(list); sidebar.append(outline);
-  if (designDraft.openQuestions?.length) {
+  if (viewedDraft.openQuestions?.length) {
     const questions = node("section", undefined, "design-questions"); questions.append(node("h3", "待确认"));
-    const list = node("ul"); for (const question of designDraft.openQuestions) list.append(node("li", question.question));
+    const list = node("ul"); for (const question of viewedDraft.openQuestions) list.append(node("li", question.question));
     questions.append(list); sidebar.append(questions);
   }
   preview.append(canvas, sidebar); target.append(preview);
@@ -329,12 +351,41 @@ function renderDesignDraft() {
   targetSelect.value = selectedDesignComponent;
   targetSelect.onchange = () => {
     selectedDesignComponent = targetSelect.value;
-    const component = page.components.find((item) => item.instanceId === selectedDesignComponent);
-    $("#design-props").value = JSON.stringify(component?.props || {}, null, 2);
+    $("#design-props").value = "";
   };
-  const selected = page.components.find((item) => item.instanceId === selectedDesignComponent);
-  $("#design-props").value = JSON.stringify(selected?.props || {}, null, 2);
-  feedback.hidden = false;
+  feedback.hidden = !isCurrentDraft;
+}
+
+function designValues(draft) {
+  const values = new Map();
+  for (const page of draft?.pageTree || []) for (const component of page.components || []) {
+    for (const [key, value] of Object.entries(component.props || {})) values.set(`${page.page} / ${component.name} / ${key}`, JSON.stringify(value));
+  }
+  for (const [group, fields] of Object.entries(draft?.designTokens || {})) for (const [key, value] of Object.entries(fields || {})) values.set(`设计令牌 / ${group} / ${key}`, JSON.stringify(value));
+  for (const [index, page] of (draft?.pageTree || []).entries()) values.set(`页面顺序 / ${page.page}`, String(index + 1));
+  return values;
+}
+
+function renderDesignDiff(draft, revision) {
+  const target = $("#design-diff");
+  target.replaceChildren();
+  const parent = designHistory.find((item) => item.id === draft.parentId);
+  const heading = node("strong", parent ? `版本 ${revision} 相比版本 ${designHistory.indexOf(parent) + 1}` : "首版设计");
+  target.append(heading);
+  if (!parent) { target.append(node("p", "这是当前 Run 的初始设计版本。", "muted")); return; }
+  const before = designValues(parent);
+  const after = designValues(draft);
+  const changes = [];
+  for (const key of new Set([...before.keys(), ...after.keys()])) {
+    if (before.get(key) === after.get(key)) continue;
+    changes.push(`${key}: ${before.get(key) ?? "（无）"} → ${after.get(key) ?? "（无）"}`);
+  }
+  if (draft.feedback) changes.unshift(`客户反馈：${draft.feedback}`);
+  target.append(node("p", changes.length ? `${changes.length} 项变化` : "未发现字段差异", "muted"));
+  const list = node("ul");
+  for (const change of changes.slice(0, 12)) list.append(node("li", change));
+  if (changes.length > 12) list.append(node("li", `另有 ${changes.length - 12} 项变化`));
+  target.append(list);
 }
 
 function checkbox(text) { const label = node("label"); const input = node("input"); input.type = "checkbox"; label.append(input, document.createTextNode(text)); return { label, input }; }
@@ -453,15 +504,22 @@ $("#create-design").onclick = () => action(async () => {
 });
 $("#feedback-form").onsubmit = (event) => { event.preventDefault(); action(async () => {
   if (!designDraft) throw new Error("请先创建设计草稿");
+  if (viewedDesignDraftId !== designDraft.id) throw new Error("只能基于当前版本提交反馈");
   const feedback = $("#design-feedback").value.trim();
-  let props;
-  try { props = JSON.parse($("#design-props").value); } catch { throw new Error("属性补丁必须是 JSON 对象"); }
-  if (!props || typeof props !== "object" || Array.isArray(props)) throw new Error("属性补丁必须是 JSON 对象");
   const page = designDraft.pageTree.find((item) => item.page === selectedDesignPage) || designDraft.pageTree[0];
   const component = page?.components.find((item) => item.instanceId === selectedDesignComponent) || page?.components[0];
   if (!component) throw new Error("当前设计没有可修改的组件");
-  await api("POST", `/design-drafts/${encodeURIComponent(designDraft.id)}/patches`, { expectedDesignHash: designDraft.designHash, feedback, operations: [{ op: "set_props", page: page.page, componentId: component.instanceId, props }] });
+  const manualPatch = $("#design-props").value.trim();
+  if (manualPatch) {
+    let props;
+    try { props = JSON.parse(manualPatch); } catch { throw new Error("属性补丁必须是 JSON 对象"); }
+    if (!props || typeof props !== "object" || Array.isArray(props)) throw new Error("属性补丁必须是 JSON 对象");
+    await api("POST", `/design-drafts/${encodeURIComponent(designDraft.id)}/patches`, { expectedDesignHash: designDraft.designHash, feedback, operations: [{ op: "set_props", page: page.page, componentId: component.instanceId, props }] });
+  } else {
+    await api("POST", `/design-drafts/${encodeURIComponent(designDraft.id)}/feedback`, { expectedDesignHash: designDraft.designHash, feedback, page: page.page, componentId: component.instanceId });
+  }
   $("#design-feedback").value = "";
+  $("#design-props").value = "";
   await showRun();
 }); };
 $("#create-candidate").onclick = () => action(async () => {

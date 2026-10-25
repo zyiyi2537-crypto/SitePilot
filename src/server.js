@@ -27,6 +27,7 @@ import { createAgentToolRuntime, runCreationSupervisor } from "./agent-superviso
 import { JsonToolJournal, resolveToolJournalPath } from "./tool-runtime.js";
 import { applyUnifiedDiff, validateUnifiedDiff } from "./code-patch.js";
 import { bindGeneratedCandidateToPayloadWorktree } from "./payload-binding.js";
+import { parseDesignFeedback } from "./design-feedback.js";
 
 function applyRequirementBrief(strategy, brief, confirmed = {}) {
   if (!brief) return strategy;
@@ -1057,6 +1058,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const input = await readJson(req);
         const draft = store.createDesignDraft(run.id, {
           ...input,
+          parentId: input.parentId || previousDesignDraftId || null,
           designTokens: input.designTokens || run.strategy?.designTokens,
         });
         if (previousDesignDraftId && previousDesignDraftId !== draft.id) await stopDesignBoundPreviews(run, previousDesignDraftId);
@@ -1079,6 +1081,28 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         await stopDesignBoundPreviews(run, design.id);
         store.persist?.();
         return send(res, 201, result);
+      }
+      const designFeedbackMatch = url.pathname.match(/^\/design-drafts\/([^/]+)\/feedback$/);
+      if (req.method === "POST" && designFeedbackMatch) {
+        const design = store.designs.get(designFeedbackMatch[1]);
+        if (!design) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(design.runId);
+        if (!run || run.designDraftId !== design.id) return send(res, 409, { code: "STALE_REVISION" });
+        const input = await readJson(req);
+        const page = design.pageTree.find((item) => item.page === input.page);
+        if (!page) return send(res, 422, { code: "DESIGN_TARGET_INVALID", message: "请选择当前设计中的页面。" });
+        const component = page.components.find((item) => item.instanceId === input.componentId);
+        if (!component) return send(res, 422, { code: "DESIGN_TARGET_INVALID", message: "请选择当前页面中的设计区块。" });
+        try {
+          const parsed = parseDesignFeedback({ feedback: input.feedback, page, component, designDraft: design });
+          const result = store.applyDesignPatch(design.id, { expectedDesignHash: input.expectedDesignHash, feedback: parsed.feedback, operations: parsed.operations, actor: "customer" });
+          await stopDesignBoundPreviews(run, design.id);
+          store.persist?.();
+          return send(res, 201, { ...result, interpreted: parsed.operations });
+        } catch (error) {
+          if (["FEEDBACK_NOT_ACTIONABLE", "FEEDBACK_TOO_LONG"].includes(error.code)) return send(res, 422, { code: error.code, message: error.message });
+          throw error;
+        }
       }
       const designPatchesMatch = url.pathname.match(/^\/design-drafts\/([^/]+)\/patches$/);
       if (req.method === "GET" && designPatchesMatch) {

@@ -300,9 +300,22 @@ export class SitePilotStore {
     if (input.expectedDesignHash !== previous.designHash) throw new PolicyError("Design draft hash does not match", "STALE_REVISION");
     if (!Array.isArray(input.operations) || input.operations.length < 1 || input.operations.length > 20) throw new PolicyError("One to twenty design operations are required", "INVALID_INPUT");
     const pageTree = clone(previous.pageTree);
+    let designTokens = clone(previous.designTokens);
     const affectedRoutes = new Set();
     for (const operation of input.operations) {
       if (!operation || typeof operation !== "object" || typeof operation.op !== "string") throw new PolicyError("Invalid design operation", "SCHEMA_REJECTED");
+      if (operation.op === "set_tokens") {
+        if (!operation.tokens || typeof operation.tokens !== "object" || Array.isArray(operation.tokens)) throw new PolicyError("set_tokens requires an object", "SCHEMA_REJECTED");
+        const tokenGroups = Object.keys(operation.tokens);
+        if (tokenGroups.some((key) => !["color", "spacing"].includes(key))) throw new PolicyError("Unsupported design token group", "SCHEMA_REJECTED");
+        const color = operation.tokens.color && typeof operation.tokens.color === "object" ? { ...designTokens.color, ...operation.tokens.color } : designTokens.color;
+        const spacing = operation.tokens.spacing && typeof operation.tokens.spacing === "object" ? { ...designTokens.spacing, ...operation.tokens.spacing } : designTokens.spacing;
+        if (Object.keys(color).some((key) => !["primary", "surface", "text"].includes(key)) || Object.keys(spacing).some((key) => !["unit", "section"].includes(key))) throw new PolicyError("Unsupported design token", "SCHEMA_REJECTED");
+        assertBoundedJson({ color, spacing });
+        designTokens = normalizeDesignTokens({ ...designTokens, color, spacing });
+        for (const route of run.pagePlan?.routes || previous.pageTree) affectedRoutes.add(route.route);
+        continue;
+      }
       const page = pageTree.find((item) => item.page === operation.page);
       if (!page) throw new PolicyError("Design operation references an unknown page", "SCHEMA_REJECTED");
       const component = page.components.find((item) => item.instanceId === operation.componentId);
@@ -326,7 +339,7 @@ export class SitePilotStore {
       }
     }
     const next = this.createDesignDraft(previous.runId, {
-      parentId: previous.id, pageTree, designTokens: previous.designTokens,
+      parentId: previous.id, pageTree, designTokens,
       blockRegistryVersion: previous.blockRegistryVersion, openQuestions: previous.openQuestions, feedback: input.feedback,
     });
     const patch = deepFreeze({
