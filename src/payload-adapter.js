@@ -129,10 +129,11 @@ function isValidDesignMappings(value, designDraftId, designHash) {
     let heroes = 0;
     let layoutIndex = 0;
     for (const component of page.components) {
-      if (!component || typeof component.instanceId !== "string" || component.instanceId.length > 128 || typeof component.registryId !== "string" || component.registryId.length > 128 || !/^[a-f0-9]{64}$/i.test(component.propsHash || "") || !["Hero", "Content", "CTA"].includes(component.name) || component.copyPolicy !== "approved_content_required") return false;
+      if (!component || typeof component.instanceId !== "string" || component.instanceId.length > 128 || typeof component.registryId !== "string" || component.registryId.length > 128 || !/^[a-f0-9]{64}$/i.test(component.propsHash || "") || !["Hero", "Content", "CTA", "ProductGrid", "ContactForm"].includes(component.name) || component.copyPolicy !== "approved_content_required") return false;
       if (instances.has(component.instanceId)) return false;
       instances.add(component.instanceId);
-      const expected = component.name === "Hero" ? { target: "hero", blockType: null } : { target: `layout[${layoutIndex++}]`, blockType: component.name === "Content" ? "content" : "cta" };
+      const blockTypes = { Content: "content", CTA: "cta", ProductGrid: "productGrid", ContactForm: "contactForm" };
+      const expected = component.name === "Hero" ? { target: "hero", blockType: null } : { target: `layout[${layoutIndex++}]`, blockType: blockTypes[component.name] };
       if (component.payloadTarget !== expected.target || component.blockType !== expected.blockType) return false;
       if (component.name === "Hero") heroes += 1;
     }

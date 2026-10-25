@@ -926,7 +926,9 @@ test("Payload draft plan emits real Website Template pages and blocks unsupporte
   assert.equal(plan.operations[0].collection, "pages");
   assert.equal(plan.operations[0].data.hero.type, "lowImpact");
   assert.equal(plan.operations[0].data.layout[0].blockType, "content");
-  assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["ProductGrid"], locales: ["en"] }, contentByPage: { home: content.home } }), /schema/);
+  const commerce = createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["Hero", "ProductGrid", "ContactForm"], locales: ["en"] }, contentByPage: { home: { ...content.home, products: [{ slug: "alpha" }], formSlug: "contact" } } });
+  assert.deepEqual(commerce.operations[0].data.layout.map((block) => block.blockType), ["productGrid", "contactForm"]);
+  assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["Hero", "ProductGrid"], locales: ["en"] }, contentByPage: { home: content.home } }), /products/);
   assert.throws(() => createPayloadDraftPlan({ strategy: { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["zh-CN", "en"] }, contentByPage: { home: content.home } }), /localization/);
 });
 

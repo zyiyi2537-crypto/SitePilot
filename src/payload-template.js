@@ -8,6 +8,8 @@ const PAYLOAD_BLOCKS = Object.freeze({
   Hero: { target: "hero" },
   Content: { target: "layout", blockType: "content" },
   CTA: { target: "layout", blockType: "cta" },
+  ProductGrid: { target: "layout", blockType: "productGrid" },
+  ContactForm: { target: "layout", blockType: "contactForm" },
 });
 
 function propsHash(props) {
@@ -46,6 +48,14 @@ function pageOperation(page, componentNames, locale, content) {
     } else if (block === "CTA") {
       if (!content.cta?.trim()) throw new PolicyError(`CTA text is required: ${page}`, "NEEDS_INPUT");
       layout.push({ blockType: "cta", richText: richText(content.cta, "", 2), links: [] });
+    } else if (block === "ProductGrid") {
+      const products = Array.isArray(content.products) ? content.products : [];
+      if (!products.length) throw new PolicyError(`ProductGrid requires approved products: ${page}`, "NEEDS_INPUT");
+      if (products.length > 24 || products.some((product) => !product || typeof product.slug !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(product.slug))) throw new PolicyError(`ProductGrid contains invalid product references: ${page}`, "SCHEMA_REJECTED");
+      layout.push({ blockType: "productGrid", heading: content.productGridTitle || "Products", products: products.map(({ slug }) => ({ relationTo: "products", value: slug })) });
+    } else if (block === "ContactForm") {
+      if (typeof content.formSlug !== "string" || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(content.formSlug)) throw new PolicyError(`ContactForm requires an approved form reference: ${page}`, "NEEDS_INPUT");
+      layout.push({ blockType: "contactForm", form: { relationTo: "forms", value: content.formSlug }, consentRequired: true });
     }
   }
   return {

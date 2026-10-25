@@ -2,7 +2,7 @@ import { PolicyError } from "./core.js";
 
 const COLLECTIONS = new Set(["pages", "products", "cases", "forms"]);
 const LOCALES = new Set(["zh-CN", "en", "en-US", "ja", "de", "fr"]);
-const PAGE_FIELDS = ["slug", "title", "hero", "blocks", "seo", "status"];
+const PAGE_FIELDS = ["slug", "title", "hero", "layout", "seo", "status"];
 
 function unique(values) {
   return [...new Set(values)];
@@ -29,7 +29,7 @@ export function planPayloadSchema({ strategy, locales, projectId } = {}) {
   const collections = [
     collection("pages", [
       ["slug", "text", true], ["title", "text", true], ["hero", "group"],
-      ["blocks", "blocks"], ["seo", "group"], ["status", "select", true],
+      ["layout", "blocks"], ["seo", "group"], ["status", "select", true],
     ]),
   ];
   if (hierarchy.includes("products") || blocks.includes("ProductGrid")) {
