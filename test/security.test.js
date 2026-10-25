@@ -596,6 +596,9 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(store.candidates.get(candidate.id).payloadBuild.candidateHash, candidate.candidateHash);
   assert.equal(buildCalls, 1);
   const previewUrl = "http://127.0.0.1:43123/";
+  const rejectedRemotePreview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, { baseUrl: "https://example.com/", expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(rejectedRemotePreview.status, 422);
+  assert.equal(rejectedRemotePreview.body.code, "POLICY_DENIED");
   const unauthorizedPreview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.apiToken, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
   assert.equal(unauthorizedPreview.status, 401);
   const preview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
@@ -603,6 +606,8 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.match(preview.body.previewId, /^payload_preview_/);
   assert.equal(preview.body.candidateHash, candidate.candidateHash);
   assert.equal(preview.body.baseUrl, undefined);
+  assert.equal(store.candidates.get(candidate.id).payloadPreview.baseUrl, undefined);
+  assert.match(store.candidates.get(candidate.id).payloadPreview.baseUrlHash, /^[a-f0-9]{64}$/);
   const previewReplay = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
   assert.equal(previewReplay.status, 200);
   assert.equal(previewReplay.body.previewId, preview.body.previewId);

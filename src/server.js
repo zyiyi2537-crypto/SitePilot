@@ -867,24 +867,32 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (candidate.build?.requiresPayloadBuild !== true || !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const input = await readJson(req);
         const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
+        let previewUrl;
+        try { previewUrl = new URL(baseUrl); }
+        catch { throw new PolicyError("Payload preview URL is invalid", "INVALID_INPUT"); }
+        const allowedHosts = new Set(["127.0.0.1", "localhost"]);
+        if (previewUrl.protocol !== "http:" || !allowedHosts.has(previewUrl.hostname) || previewUrl.username || previewUrl.password || previewUrl.pathname !== "/" || previewUrl.search || previewUrl.hash) {
+          throw new PolicyError("Payload preview must use a fixed localhost HTTP origin", "POLICY_DENIED");
+        }
         const parsedExpiresAt = typeof input.expiresAt === "string" ? Date.parse(input.expiresAt) : Number(input.expiresAt);
         const now = Date.now();
         if (!baseUrl || baseUrl.length > 500 || !Number.isFinite(parsedExpiresAt) || parsedExpiresAt <= now || parsedExpiresAt > now + 60 * 60 * 1000) {
           throw new PolicyError("Payload preview URL and an expiry within one hour are required", "INVALID_INPUT");
         }
+        const baseUrlHash = crypto.createHash("sha256").update(previewUrl.href).digest("hex");
         const existing = candidate.payloadPreview;
-        if (existing?.candidateHash === candidate.candidateHash && existing.baseUrl === baseUrl && existing.expiresAt > now && payloadPreviewSessions.has(existing.previewId)) {
+        if (existing?.candidateHash === candidate.candidateHash && existing.baseUrlHash === baseUrlHash && existing.expiresAt > now && payloadPreviewSessions.has(existing.previewId)) {
           return send(res, 200, { previewId: existing.previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(existing.expiresAt).toISOString(), localOnly: true, writesAllowed: false, idempotent: true });
         }
         const previewId = `payload_preview_${crypto.randomUUID().replaceAll("-", "")}`;
-        quality.preview.registerPreview({ id: previewId, baseUrl, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
+        quality.preview.registerPreview({ id: previewId, baseUrl: previewUrl.href, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
         const timer = setTimeout(() => {
           payloadPreviewSessions.delete(previewId);
           quality.preview.unregisterPreview?.(previewId);
         }, Math.max(1, parsedExpiresAt - now));
         timer.unref?.();
         payloadPreviewSessions.set(previewId, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt, timer });
-        candidate.payloadPreview = Object.freeze({ previewId, baseUrl, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
+        candidate.payloadPreview = Object.freeze({ previewId, baseUrlHash, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
         store.event(candidate.runId, "payload.preview.registered", { candidateId: candidate.id, candidateHash: candidate.candidateHash, previewId, expiresAt: new Date(parsedExpiresAt).toISOString() });
         store.persist?.();
         return send(res, 201, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(parsedExpiresAt).toISOString(), localOnly: true, writesAllowed: false });
