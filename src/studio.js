@@ -205,6 +205,7 @@ function renderDelivery(result) {
   $("#prepare-payload").disabled = !runId || !hasPlan || hasPayloadWorktree || !hasL2Credentials;
   $("#create-candidate").disabled = !hasPlan || Boolean(alreadyGenerated);
   $("#build-payload-candidate").disabled = !isCurrentCandidate || !payloadBuildRequired || !hasPayloadWorktree || payloadBuildReady || !hasL2Credentials;
+  $("#register-payload-preview").disabled = !isCurrentCandidate || !payloadBuildReady || !$("#payload-preview-url").value.trim() || !hasL2Credentials;
   $("#generate-content").disabled = !isCurrentCandidate || !payloadBuildReady || Boolean(currentCandidate.cmsSnapshot);
   const contentApprovalRequired = currentRun?.contentModel?.status === "proposed" && currentRun.contentModel.candidateId === currentCandidate?.id;
   const contentApproved = currentCandidate?.contentApproval?.contentHash === currentRun?.contentModel?.contentHash;
@@ -505,6 +506,16 @@ $("#build-payload-candidate").onclick = () => action(async () => {
   renderDelivery({ candidate: result.candidate, payloadBuild: result.build });
   return "Payload 候选构建通过；QA 仍必须使用实际 Payload 预览，而不是本地结构预览";
 });
+$("#register-payload-preview").onclick = () => action(async () => {
+  if (!currentCandidate?.id) throw new Error("请先生成并构建 Payload 候选");
+  const baseUrl = $("#payload-preview-url").value.trim();
+  if (!baseUrl) throw new Error("请输入 Payload 预览地址");
+  const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/payload-preview`, { baseUrl, expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString() }, "l2");
+  $("#qa-preview-id").value = result.previewId;
+  qaPreviewCandidateHash = currentCandidate.candidateHash;
+  renderDelivery({ candidate: currentCandidate, payloadPreview: result });
+  return `真实 Payload 预览已登记：${result.previewId}`;
+});
 $("#generate-content").onclick = () => action(async () => {
   if (!runId || !currentCandidate?.build?.passed) throw new Error("请先生成通过构建门禁的候选");
   $("#content-reviewed").checked = false;
@@ -602,6 +613,7 @@ $("#run-qa").onclick = () => action(async () => {
   renderDelivery({ candidate: currentCandidate, preview: currentPreview, qa: report, previewType: requiresPayloadBuild ? "payload-preview" : "local-structural-preview" });
 });
 $("#qa-preview-id").addEventListener("input", () => renderDelivery());
+$("#payload-preview-url").addEventListener("input", () => renderDelivery());
 
 $("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => {
   const requestText = new FormData(event.target).get("requestText").trim();

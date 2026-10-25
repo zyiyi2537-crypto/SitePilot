@@ -147,6 +147,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   const executingCodePatches = new Set();
   const runningAgentRuns = new Set();
   const previewSessions = new Map();
+  const payloadPreviewSessions = new Map();
   const intakePreviews = new Map();
   const previewTtlMs = 15 * 60 * 1000;
   const apiToken = auth.apiToken ?? process.env.SITEPILOT_API_TOKEN ?? "";
@@ -265,6 +266,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
       const codePatchExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-execution$/);
       const candidatePayloadBuildMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-build$/);
+      const payloadPreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-preview$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
       const grantMatch = url.pathname.match(/^\/runs\/([^/]+)\/grants$/);
@@ -275,8 +277,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if ((generateMatch || codePatchExecutionMatch || reworkExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      if ((payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch) ? l2Token : apiToken;
+      if ((payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || payloadPreviewMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || payloadPreviewMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -856,6 +858,37 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           throw error;
         }
       }
+      if (req.method === "POST" && payloadPreviewMatch) {
+        if (!quality?.preview || typeof quality.preview.registerPreview !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(payloadPreviewMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (candidate.build?.requiresPayloadBuild !== true || !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+        const input = await readJson(req);
+        const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim() : "";
+        const parsedExpiresAt = typeof input.expiresAt === "string" ? Date.parse(input.expiresAt) : Number(input.expiresAt);
+        const now = Date.now();
+        if (!baseUrl || baseUrl.length > 500 || !Number.isFinite(parsedExpiresAt) || parsedExpiresAt <= now || parsedExpiresAt > now + 60 * 60 * 1000) {
+          throw new PolicyError("Payload preview URL and an expiry within one hour are required", "INVALID_INPUT");
+        }
+        const existing = candidate.payloadPreview;
+        if (existing?.candidateHash === candidate.candidateHash && existing.baseUrl === baseUrl && existing.expiresAt > now && payloadPreviewSessions.has(existing.previewId)) {
+          return send(res, 200, { previewId: existing.previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(existing.expiresAt).toISOString(), localOnly: true, writesAllowed: false, idempotent: true });
+        }
+        const previewId = `payload_preview_${crypto.randomUUID().replaceAll("-", "")}`;
+        quality.preview.registerPreview({ id: previewId, baseUrl, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
+        const timer = setTimeout(() => {
+          payloadPreviewSessions.delete(previewId);
+          quality.preview.unregisterPreview?.(previewId);
+        }, Math.max(1, parsedExpiresAt - now));
+        timer.unref?.();
+        payloadPreviewSessions.set(previewId, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt, timer });
+        candidate.payloadPreview = Object.freeze({ previewId, baseUrl, candidateHash: candidate.candidateHash, expiresAt: parsedExpiresAt });
+        store.event(candidate.runId, "payload.preview.registered", { candidateId: candidate.id, candidateHash: candidate.candidateHash, previewId, expiresAt: new Date(parsedExpiresAt).toISOString() });
+        store.persist?.();
+        return send(res, 201, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(parsedExpiresAt).toISOString(), localOnly: true, writesAllowed: false });
+      }
       const answersMatch = url.pathname.match(/^\/runs\/([^/]+)\/answers$/);
       if (req.method === "POST" && answersMatch) {
         const run = store.runs.get(answersMatch[1]);
@@ -1315,7 +1348,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
         if (candidate.build?.requiresPayloadBuild === true && !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
         const input = await readJson(req);
-        if (candidate.payloadBuild?.passed === true && previewSessions.has(input.qaPreviewId)) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+        if (candidate.payloadBuild?.passed === true) {
+          if (previewSessions.has(input.qaPreviewId)) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+          const runtimePreview = payloadPreviewSessions.get(input.qaPreviewId);
+          const registered = runtimePreview?.candidateId === candidate.id
+            && runtimePreview.candidateHash === candidate.candidateHash
+            && runtimePreview.expiresAt > Date.now()
+            || quality?.preview?.matchesPreview?.(input.qaPreviewId, candidate.candidateHash) === true;
+          if (!registered) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+        }
         const report = await quality.run({ ...input, candidateId: candidate.id, candidateHash: candidate.candidateHash });
         if (report.candidateId !== candidate.id || report.candidateHash !== candidate.candidateHash) {
           throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
@@ -1357,6 +1398,11 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       session.preview.close().catch(() => {});
     }
     previewSessions.clear();
+    for (const session of payloadPreviewSessions.values()) {
+      clearTimeout(session.timer);
+      quality?.preview?.unregisterPreview?.(session.previewId);
+    }
+    payloadPreviewSessions.clear();
   });
   return server;
 }

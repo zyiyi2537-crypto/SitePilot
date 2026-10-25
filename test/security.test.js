@@ -534,7 +534,18 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer" };
   let buildCalls = 0;
   let buildMode = "pass";
-  const quality = { run: async ({ candidateId, candidateHash, qaPreviewId }) => ({ candidateId, candidateHash, qaPreviewId, passed: true, reportHash: "payload-qa-report", results: [] }) };
+  const registeredPreviews = new Map();
+  const quality = {
+    preview: {
+      registerPreview: (preview) => registeredPreviews.set(preview.id, preview),
+      unregisterPreview: (id) => registeredPreviews.delete(id),
+      matchesPreview: (id, candidateHash) => registeredPreviews.get(id)?.candidateHash === candidateHash,
+    },
+    run: async ({ candidateId, candidateHash, qaPreviewId }) => {
+      assert.equal(registeredPreviews.get(qaPreviewId)?.candidateHash, candidateHash);
+      return { candidateId, candidateHash, qaPreviewId, passed: true, reportHash: "payload-qa-report", results: [] };
+    },
+  };
   const payloadBuild = {
     worktreeRoot: root,
     build: async ({ candidateId, candidateHash }) => {
@@ -584,9 +595,22 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(built.body.build.candidateHash, candidate.candidateHash);
   assert.equal(store.candidates.get(candidate.id).payloadBuild.candidateHash, candidate.candidateHash);
   assert.equal(buildCalls, 1);
+  const previewUrl = "http://127.0.0.1:43123/";
+  const unauthorizedPreview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.apiToken, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(unauthorizedPreview.status, 401);
+  const preview = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(preview.status, 201, JSON.stringify(preview.body));
+  assert.match(preview.body.previewId, /^payload_preview_/);
+  assert.equal(preview.body.candidateHash, candidate.candidateHash);
+  assert.equal(preview.body.baseUrl, undefined);
+  const previewReplay = await request(server, "POST", `/candidates/${candidate.id}/payload-preview`, auth.l2Token, { baseUrl: previewUrl, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(previewReplay.status, 200);
+  assert.equal(previewReplay.body.previewId, preview.body.previewId);
   const qa = await request(server, "POST", `/candidates/${candidate.id}/qa`, auth.apiToken, { qaPreviewId: "payload-preview-registered-on-server", routes: ["/"], locales: ["en"] });
-  assert.equal(qa.status, 200);
-  assert.equal(qa.body.qaPreviewId, "payload-preview-registered-on-server");
+  assert.equal(qa.status, 422);
+  const registeredQa = await request(server, "POST", `/candidates/${candidate.id}/qa`, auth.apiToken, { qaPreviewId: preview.body.previewId, routes: ["/"], locales: ["en"] });
+  assert.equal(registeredQa.status, 200);
+  assert.equal(registeredQa.body.qaPreviewId, preview.body.previewId);
   assert.equal(store.candidates.get(candidate.id).quality.passed, true);
 
   const replay = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: grant.body.id });

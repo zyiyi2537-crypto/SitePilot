@@ -1329,7 +1329,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 
 接下来的项目按“先贯通一条客户可见的创建闭环，再扩大到生产与维护”推进。自然语言建站是当前产品主线；`cms-agent-platform-plan.md` 提供维护模式和共享工程内核的设计，不要求首轮同时交付 GitHub Issue 自动修复、PostHog、自托管整套监控或自动 PR。
 
-当前代码进度按 **PRD Draft 1.1** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：后者必须通过服务端固定预览注册表提供 opaque preview ID，并由 Playwright 校验候选 hash。真实 Docker 构建、持久化客户预览服务和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
+当前代码进度按 **PRD Draft 1.1** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：后者必须通过 L2-only `POST /candidates/:id/payload-preview` 登记 loopback runner 地址，服务端生成短期 opaque preview ID 并由 Playwright 校验候选 hash。该接口不提供公网 URL、不允许发布和写入。真实 Docker 构建、持久化客户预览服务和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
 
 | 能力 | 当前经仓库/CI 记录的状态 | 本次迭代判断 |
 |---|---|---|

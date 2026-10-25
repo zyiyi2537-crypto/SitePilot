@@ -95,4 +95,14 @@ export class PlaywrightPreviewAdapter {
   unregisterPreview(id) {
     return this.previews.delete(id);
   }
+
+  hasPreview(id) {
+    const preview = this.previews.get(id);
+    return Boolean(preview && (!preview.expiresAt || preview.expiresAt > Date.now()));
+  }
+
+  matchesPreview(id, candidateHash) {
+    const preview = this.previews.get(id);
+    return Boolean(preview && preview.candidateHash === candidateHash && (!preview.expiresAt || preview.expiresAt > Date.now()));
+  }
 }
