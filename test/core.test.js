@@ -824,6 +824,18 @@ test("Payload build pipeline requires L2 and a pinned Docker image before execut
   await fs.rm(root, { recursive: true });
 });
 
+test("Payload preview refuses to start without an explicitly configured isolated network", async () => {
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: "/tmp/sitepilot-payload-source", worktreeRoot: "/tmp/sitepilot-payload-worktrees", image: `node@sha256:${"a".repeat(64)}` });
+  await assert.rejects(() => pipeline.startPreview({ candidateId: "candidate", candidateHash: "b".repeat(64), worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "SANDBOX_REQUIRED");
+});
+
+test("Payload preview rejects a Docker network that is not internal", async () => {
+  const calls = [];
+  const pipeline = new PayloadBuildPipeline({ sourceRoot: "/tmp/sitepilot-payload-source", worktreeRoot: "/tmp/sitepilot-payload-worktrees", image: `node@sha256:${"a".repeat(64)}`, previewNetwork: "sitepilot-preview", runner: async (command, args) => { calls.push([command, args]); return { stdout: "false\n" }; } });
+  await assert.rejects(() => pipeline.startPreview({ candidateId: "candidate", candidateHash: "b".repeat(64), worktree: { baseCommit: PINNED_SOURCES.payloadWebsite.commit, repositoryPathRef: "project/run/worktree" }, grant: { level: "L2" } }), (error) => error.code === "SANDBOX_REQUIRED" && /Internal=true/.test(error.message));
+  assert.deepEqual(calls[0], ["docker", ["network", "inspect", "--format", "{{.Internal}}", "sitepilot-preview"]]);
+});
+
 test("Payload build pipeline checks sandbox Node version before install", async () => {
   const root = await fs.mkdtemp("/tmp/sitepilot-payload-node-");
   const source = path.join(root, "source");

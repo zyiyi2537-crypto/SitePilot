@@ -173,6 +173,17 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     return text ? JSON.parse(text) : {};
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
+  const stopPayloadPreviews = async (candidateId) => {
+    for (const [previewId, session] of payloadPreviewSessions) {
+      if (session.candidateId !== candidateId) continue;
+      clearTimeout(session.timer);
+      payloadPreviewSessions.delete(previewId);
+      quality?.preview?.unregisterPreview?.(previewId);
+      await session.stop?.();
+    }
+    const candidate = store.candidates.get(candidateId);
+    if (candidate?.payloadPreview) candidate.payloadPreview = Object.freeze({ ...candidate.payloadPreview, stoppedAt: new Date().toISOString() });
+  };
   const candidateBuildReady = (candidate) => candidate?.build?.passed === true
     && (candidate.build.requiresPayloadBuild !== true || candidate.payloadBuild?.passed === true && candidate.payloadBuild.candidateHash === candidate.candidateHash);
   const generationWorkspace = (run, designId) => path.resolve(generation.worktreeRoot, run.id, run.candidateIds?.length ? designId : "");
@@ -266,6 +277,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const codePatchApprovalMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-approval$/);
       const codePatchExecutionMatch = url.pathname.match(/^\/candidates\/([^/]+)\/code-patch-execution$/);
       const candidatePayloadBuildMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-build$/);
+      const candidatePayloadPreviewStartMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-preview\/start$/);
+      const candidatePayloadPreviewStopMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-preview$/);
       const payloadPreviewMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-preview$/);
       const blockReviewMatch = url.pathname.match(/^\/components\/([^/]+)\/review$/);
       const generateMatch = url.pathname.match(/^\/runs\/([^/]+)\/generate$/);
@@ -277,8 +290,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       const payloadPlanMatch = url.pathname.match(/^\/candidates\/([^/]+)\/payload-plan$/);
       const previewMatch = url.pathname.match(/^\/previews\/([^/]+)$/);
       if ((generateMatch || codePatchExecutionMatch || reworkExecutionMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      if ((payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || payloadPreviewMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
-      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || payloadPreviewMatch) ? l2Token : apiToken;
+      if ((payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || candidatePayloadPreviewStartMatch || payloadPreviewMatch) && (l2Token.length < 32 || l2Token === apiToken || l2Token === reviewerToken)) return send(res, 503, { code: "L2_NOT_CONFIGURED" });
+      const requiredToken = req.method === "POST" && (reviewMatch || reworkMatch || contentApprovalMatch || codePatchApprovalMatch || blockReviewMatch || grantMatch || grantRevokeMatch) ? reviewerToken : req.method === "POST" && (generateMatch || codePatchExecutionMatch || reworkExecutionMatch || payloadPrepareMatch || payloadBuildMatch || candidatePayloadBuildMatch || candidatePayloadPreviewStartMatch || payloadPreviewMatch) ? l2Token : apiToken;
       if (!validToken(authorization, requiredToken)) return send(res, 401, { code: "UNAUTHORIZED", message: "Valid SitePilot credential required" });
       if (req.method === "GET" && url.pathname === "/model/status") {
         return send(res, 200, activeIntake ? { configured: true, model: activeModelConfig?.model || activeIntake.modelVersion, baseUrl: activeModelConfig?.baseUrl || activeIntake.endpoint || null, apiMode: activeModelConfig?.apiMode || activeIntake.apiMode || "chat_completions", keyConfigured: true, source: activeModelConfig?.source || "server" } : { configured: false, model: null, baseUrl: null, apiMode: null, keyConfigured: false, source: null });
@@ -752,6 +765,15 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
           resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
           planHash = candidate.candidateHash;
+        } else if (tool === "start_payload_preview") {
+          if (!payloadBuild || typeof payloadBuild.startPreview !== "function") return send(res, 503, { code: "PAYLOAD_PREVIEW_NOT_CONFIGURED" });
+          const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
+          if (!candidate || candidate.runId !== run.id || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
+          if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+          resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
+          planHash = candidate.candidateHash;
         } else if (tool === "apply_code_patch") {
           if (!generation?.worktreeRoot) return send(res, 503, { code: "GENERATION_NOT_CONFIGURED" });
           const candidate = typeof input.candidateId === "string" ? store.candidates.get(input.candidateId) : null;
@@ -857,6 +879,56 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           store.persist?.();
           throw error;
         }
+      }
+      if (req.method === "POST" && candidatePayloadPreviewStartMatch) {
+        if (!payloadBuild || typeof payloadBuild.startPreview !== "function") return send(res, 503, { code: "PAYLOAD_PREVIEW_NOT_CONFIGURED" });
+        if (!quality?.preview || typeof quality.preview.registerPreview !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
+        const candidate = store.candidates.get(candidatePayloadPreviewStartMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const run = store.runs.get(candidate.runId);
+        if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+        if (candidate.build?.requiresPayloadBuild !== true || !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+        const existing = candidate.payloadPreview;
+        if (existing?.candidateHash === candidate.candidateHash && existing.expiresAt > Date.now() && payloadPreviewSessions.has(existing.previewId)) {
+          return send(res, 200, { previewId: existing.previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(existing.expiresAt).toISOString(), localOnly: true, writesAllowed: false, idempotent: true });
+        }
+        const input = await readJson(req);
+        const payloadWorktree = candidate.codeArtifact?.payloadWorktree;
+        if (!payloadWorktree || typeof payloadWorktree.repositoryPathRef !== "string") return send(res, 422, { code: "PAYLOAD_WORKTREE_REQUIRED" });
+        const resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
+        grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "start_payload_preview", resource, planHash: candidate.candidateHash });
+        let started;
+        try {
+          started = await payloadBuild.startPreview({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } });
+          const previewUrl = new URL(started.baseUrl);
+          const now = Date.now();
+          const expiresAt = Number(started.expiresAt);
+          if (previewUrl.protocol !== "http:" || !new Set(["127.0.0.1", "localhost"]).has(previewUrl.hostname) || previewUrl.username || previewUrl.password || previewUrl.pathname !== "/" || previewUrl.search || previewUrl.hash || !Number.isFinite(expiresAt) || expiresAt <= now || expiresAt > now + 60 * 60 * 1000) throw new PolicyError("Payload preview runner returned an unsafe or expired URL", "POLICY_DENIED");
+          const previewId = `payload_preview_${crypto.randomUUID().replaceAll("-", "")}`;
+          quality.preview.registerPreview({ id: previewId, baseUrl: previewUrl.href, candidateHash: candidate.candidateHash, expiresAt });
+          const timer = setTimeout(() => {
+            payloadPreviewSessions.delete(previewId);
+            quality.preview.unregisterPreview?.(previewId);
+            Promise.resolve(started.stop?.()).catch(() => {});
+          }, Math.max(1, expiresAt - now));
+          timer.unref?.();
+          payloadPreviewSessions.set(previewId, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt, timer, stop: started.stop });
+          candidate.payloadPreview = Object.freeze({ previewId, baseUrlHash: crypto.createHash("sha256").update(previewUrl.href).digest("hex"), candidateHash: candidate.candidateHash, expiresAt });
+          store.event(candidate.runId, "payload.preview.started", { candidateId: candidate.id, candidateHash: candidate.candidateHash, previewId, expiresAt: new Date(expiresAt).toISOString() });
+          store.persist?.();
+          return send(res, 201, { previewId, candidateId: candidate.id, candidateHash: candidate.candidateHash, expiresAt: new Date(expiresAt).toISOString(), localOnly: true, writesAllowed: false });
+        } catch (error) {
+          await started?.stop?.();
+          throw error;
+        }
+      }
+      if (req.method === "DELETE" && candidatePayloadPreviewStopMatch) {
+        const candidate = store.candidates.get(candidatePayloadPreviewStopMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        await stopPayloadPreviews(candidate.id);
+        store.event(candidate.runId, "payload.preview.stopped", { candidateId: candidate.id, candidateHash: candidate.candidateHash });
+        store.persist?.();
+        return send(res, 200, { candidateId: candidate.id, stopped: true });
       }
       if (req.method === "POST" && payloadPreviewMatch) {
         if (!quality?.preview || typeof quality.preview.registerPreview !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
@@ -1009,6 +1081,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           : null;
         const build = await validateGeneratedCandidate({ worktreeRoot: root, expectedDesignHash: designDraft.designHash });
         const candidate = store.createCandidate(run.id, { parentId: previousCandidate?.id || null, designDraftId: designDraft.id, codeArtifact: { workspace: root, files: generated.files, head: "local-uncommitted", designDraftId: designDraft.id, designHash: designDraft.designHash, ...(payloadWorktree ? { payloadWorktree } : {}) }, build: { ...build, requiresPayloadBuild: true, mode: payloadWorktree ? "payload-worktree-bound" : "static-scaffold" }, sourceRefs: run.research?.evidence || [] });
+        if (previousCandidate) await stopPayloadPreviews(previousCandidate.id);
         run.checkpoint = "candidate_ready";
         store.persist?.();
         return send(res, 201, { candidate, generated, build });
@@ -1096,6 +1169,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             build: { ...build, mode: "static-rebuild", requiresPayloadBuild: candidate.build?.requiresPayloadBuild === true, passed: true },
             sourceRefs: candidate.sourceRefs,
           });
+          await stopPayloadPreviews(candidate.id);
           candidate.status = "superseded";
           // A source revision invalidates all candidate-bound content and CMS approvals.
           // ContentCMS must regenerate the model against the child hash before any CMS
@@ -1173,6 +1247,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const build = await validateGeneratedCandidate({ worktreeRoot: target, expectedDesignHash: design?.designHash || undefined });
           const { payloadWorktree: _payloadWorktree, ...sourceCodeArtifact } = candidate.codeArtifact || {};
           const child = store.createCandidate(run.id, { parentId: candidate.id, designDraftId: candidate.designDraftId, codeArtifact: { ...sourceCodeArtifact, workspace: target, files: source.sourceFiles, head: newHead, patchHash: patch.codePatchHash, designDraftId: candidate.designDraftId, designHash: design?.designHash || null }, build: { ...build, mode: "static-rebuild", requiresPayloadBuild: candidate.build?.requiresPayloadBuild === true, passed: true }, sourceRefs: candidate.sourceRefs });
+          await stopPayloadPreviews(candidate.id);
           candidate.status = "superseded";
           const oldContent = candidate.contentModel || (run.contentModel?.candidateId === candidate.id ? run.contentModel : null);
           if (oldContent) {
@@ -1201,7 +1276,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       if (req.method === "POST" && candidateRunMatch) {
         const run = store.runs.get(candidateRunMatch[1]);
         if (!run) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
-        const candidate = store.createCandidate(run.id, await readJson(req));
+        const input = await readJson(req);
+        const candidate = store.createCandidate(run.id, input);
+        if (input.parentId) await stopPayloadPreviews(input.parentId);
         run.checkpoint = "candidate_ready";
         store.persist?.();
         return send(res, 201, candidate);
@@ -1285,6 +1362,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         }
         const existing = receipt.requestHash ? [...store.candidates.values()].find((item) => item.parentId === candidate.id && item.cmsSnapshot?.requestHash === receipt.requestHash) : null;
         const revision = existing || store.createPayloadCandidate(candidate.id, receipt);
+        if (!existing) await stopPayloadPreviews(candidate.id);
         run.checkpoint = "cms_candidate_ready";
         store.persist?.();
         store.event(candidate.runId, "payload.draft.created", { candidateId: revision.id, parentCandidateId: candidate.id, cmsSnapshotId: receipt.cmsSnapshotId });
@@ -1409,6 +1487,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     for (const session of payloadPreviewSessions.values()) {
       clearTimeout(session.timer);
       quality?.preview?.unregisterPreview?.(session.previewId);
+      session.stop?.();
     }
     payloadPreviewSessions.clear();
   });
@@ -1439,6 +1518,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const grants = databaseFile ? new SqliteGrantStore(databaseFile) : process.env.SITEPILOT_GRANTS_DB ? new SqliteGrantStore(process.env.SITEPILOT_GRANTS_DB) : new GrantStore();
   const quality = process.env.SITEPILOT_QA_PREVIEWS && process.env.SITEPILOT_QA_ARTIFACT_ROOT ? new QualityAdapter({ preview: new PlaywrightPreviewAdapter({ previews: JSON.parse(process.env.SITEPILOT_QA_PREVIEWS), artifactRoot: process.env.SITEPILOT_QA_ARTIFACT_ROOT }) }) : null;
   const payloadBuildSettings = [process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, process.env.SITEPILOT_WORKTREE_ROOT, process.env.SITEPILOT_SANDBOX_IMAGE];
-  const payloadBuild = payloadBuildSettings.every(Boolean) ? new PayloadBuildPipeline({ sourceRoot: process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT, image: process.env.SITEPILOT_SANDBOX_IMAGE }) : null;
+  const payloadBuild = payloadBuildSettings.every(Boolean) ? new PayloadBuildPipeline({ sourceRoot: process.env.SITEPILOT_PAYLOAD_SOURCE_ROOT, worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT, image: process.env.SITEPILOT_SANDBOX_IMAGE, previewNetwork: process.env.SITEPILOT_PAYLOAD_PREVIEW_NETWORK }) : null;
   createServer(store, {}, evidence, registry, codeAtlas, payload, quality, { worktreeRoot: process.env.SITEPILOT_WORKTREE_ROOT }, grants, payloadBuild, null, createOpenAICompatibleIntakeAdapter, createPiModelRuntime, agentToolJournal).listen(port, host, () => console.log(`SitePilot API listening on http://${host}:${port}`));
 }

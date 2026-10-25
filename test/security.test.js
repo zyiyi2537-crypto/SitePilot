@@ -533,6 +533,8 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   const commit = "31ba7ee8271998ad7aa8963111764cbacf37b157";
   const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer" };
   let buildCalls = 0;
+  let previewStarts = 0;
+  let previewStops = 0;
   let buildMode = "pass";
   const registeredPreviews = new Map();
   const quality = {
@@ -553,6 +555,10 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
       if (buildMode === "fail") return { candidateId, candidateHash, sourceCommit: commit, build: { passed: false, reportHash: "failed-report" } };
       if (buildMode === "wrong-hash") return { candidateId, candidateHash: "wrong-hash", sourceCommit: commit, build: { passed: true, reportHash: "wrong-hash-report" } };
       return { candidateId, candidateHash, sourceCommit: commit, build: { passed: true, reportHash: "passed-report" } };
+    },
+    startPreview: async ({ candidateId, candidateHash }) => {
+      previewStarts += 1;
+      return { candidateId, candidateHash, baseUrl: "http://127.0.0.1:43124/", expiresAt: Date.now() + 60_000, stop: async () => { previewStops += 1; } };
     },
   };
   const grants = new GrantStore();
@@ -623,6 +629,20 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(replay.body.idempotent, true);
   assert.equal(buildCalls, 1);
   assert.equal(store.packageReview(candidate.id, { approvedByReviewer: auth.reviewerId }).status, "ready_for_review");
+
+  const autoCandidate = makeCandidate();
+  const autoBuildGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_candidate", candidateId: autoCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal((await request(server, "POST", `/candidates/${autoCandidate.id}/payload-build`, auth.l2Token, { grantId: autoBuildGrant.body.id })).status, 201);
+  const autoGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "start_payload_preview", candidateId: autoCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(autoGrant.status, 201);
+  const startedPreview = await request(server, "POST", `/candidates/${autoCandidate.id}/payload-preview/start`, auth.l2Token, { grantId: autoGrant.body.id });
+  assert.equal(startedPreview.status, 201, JSON.stringify(startedPreview.body));
+  assert.match(startedPreview.body.previewId, /^payload_preview_/);
+  assert.equal(startedPreview.body.baseUrl, undefined);
+  assert.equal(previewStarts, 1);
+  const stoppedPreview = await request(server, "DELETE", `/candidates/${autoCandidate.id}/payload-preview`, auth.apiToken);
+  assert.equal(stoppedPreview.status, 200);
+  assert.equal(previewStops, 1);
 
   buildMode = "fail";
   const failedCandidate = makeCandidate();
