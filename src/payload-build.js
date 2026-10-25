@@ -89,12 +89,12 @@ export class PayloadBuildPipeline {
     if (typeof this.previewFetch !== "function") throw new PolicyError("Payload preview readiness probe is not configured", "CONFIG_REQUIRED");
     let networkState;
     try {
-      networkState = await this.runner("docker", ["network", "inspect", "--format", "{{.Internal}}", this.previewNetwork], { timeout: 10_000, maxBuffer: 1024 });
+      networkState = await this.runner("docker", ["network", "inspect", "--format", "{{.Internal}}|{{index .Labels \"sitepilot.preview\"}}", this.previewNetwork], { timeout: 10_000, maxBuffer: 1024 });
     } catch (error) {
       if (error.code === "ENOENT") throw new PolicyError("Docker sandbox is not installed", "SANDBOX_REQUIRED");
       throw error;
     }
-    if (String(networkState?.stdout || networkState || "").trim() !== "true") throw new PolicyError("Payload preview Docker network must have Internal=true", "SANDBOX_REQUIRED");
+    if (String(networkState?.stdout || networkState || "").trim() !== "true|true") throw new PolicyError("Payload preview Docker network must be Internal=true and labeled sitepilot.preview=true", "SANDBOX_REQUIRED");
     if (!worktree || worktree.baseCommit !== lock.commit || typeof worktree.repositoryPathRef !== "string") throw new PolicyError("Preview requires a pinned Payload worktree", "STALE_REVISION");
     const root = path.resolve(this.worktreeRoot);
     const projectRoot = path.resolve(root, worktree.repositoryPathRef);
