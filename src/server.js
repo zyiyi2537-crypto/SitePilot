@@ -172,6 +172,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
     return text ? JSON.parse(text) : {};
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
+  const candidateBuildReady = (candidate) => candidate?.build?.passed === true
+    && (candidate.build.requiresPayloadBuild !== true || candidate.payloadBuild?.passed === true && candidate.payloadBuild.candidateHash === candidate.candidateHash);
   const generationWorkspace = (run, designId) => path.resolve(generation.worktreeRoot, run.id, run.candidateIds?.length ? designId : "");
   const codePatchWorkspace = (run, candidate, patch) => {
     if (!generation?.worktreeRoot) throw new PolicyError("Candidate patch execution is not configured", "GENERATION_NOT_CONFIGURED");
@@ -421,7 +423,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
           if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
-          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (!run.strategy || !run.research) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
           if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
@@ -459,7 +461,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
           if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
           if (run.codingPatch?.candidateHash === candidate.candidateHash && run.codingPatch?.designHash === candidate.revision?.designHash) return send(res, 409, { code: "CODE_PATCH_ALREADY_PROPOSED" });
-          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (!run.strategy || !run.research) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
           if (!run.pagePlan) return send(res, 422, { code: "PAGE_PLAN_REQUIRED" });
@@ -506,7 +508,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           const expectedDecisionHash = cycle.reviewDecisionHash || storedDecisionHash || reviewDecisionHash(decisionContent);
           if (expectedDecisionHash !== reviewDecisionHash(decisionContent)) return send(res, 409, { code: "REVIEW_DECISION_CHANGED" });
           if (cycle.reviewDecisionHash && cycle.reviewDecisionHash !== expectedDecisionHash) return send(res, 409, { code: "STALE_REVISION" });
-          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!candidate.designDraftId || candidate.designDraftId !== run.designDraftId) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
           if (!run.strategy || !run.research || !run.pagePlan) return send(res, 422, { code: "STRATEGY_RESEARCH_REQUIRED" });
           const designDraft = store.designs.get(candidate.designDraftId);
@@ -821,28 +823,38 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         const input = await readJson(req);
         const resource = path.resolve(payloadBuild.worktreeRoot, payloadWorktree.repositoryPathRef);
         grants.consume(input.grantId, { projectId: run.projectId, runId: run.id, tool: "build_payload_candidate", resource, planHash: candidate.candidateHash });
-        const report = typeof payloadBuild.buildCandidate === "function"
-          ? await payloadBuild.buildCandidate({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } })
-          : await payloadBuild.build({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } });
-        const reportCandidateHash = report?.candidateHash || candidate.candidateHash;
-        const passed = report?.passed === true || report?.build?.passed === true;
-        if (report?.candidateId && report.candidateId !== candidate.id || reportCandidateHash !== candidate.candidateHash) throw new PolicyError("Payload build report belongs to a different candidate", "STALE_REVISION");
-        if (!passed) throw new PolicyError("Payload sandbox build did not pass", "BUILD_FAILED");
-        const receipt = Object.freeze({
-          candidateId: candidate.id,
-          candidateHash: candidate.candidateHash,
-          passed: true,
-          reportHash: report?.reportHash || report?.build?.reportHash || crypto.createHash("sha256").update(JSON.stringify(report)).digest("hex"),
-          sourceCommit: report?.sourceCommit || payloadWorktree.baseCommit || null,
-          buildState: report?.buildState || "sandbox_build_passed",
-          report,
-          builtAt: new Date().toISOString(),
-        });
-        candidate.payloadBuild = receipt;
-        run.checkpoint = "payload_build_passed";
-        store.event(run.id, "payload.candidate.built", { candidateId: candidate.id, candidateHash: candidate.candidateHash, reportHash: receipt.reportHash, sourceCommit: receipt.sourceCommit });
-        store.persist?.();
-        return send(res, 201, { candidate, build: receipt });
+        try {
+          const report = typeof payloadBuild.buildCandidate === "function"
+            ? await payloadBuild.buildCandidate({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } })
+            : await payloadBuild.build({ candidateId: candidate.id, candidateHash: candidate.candidateHash, candidate, run, worktree: payloadWorktree, grant: { level: "L2" } });
+          const passed = report?.passed === true || report?.build?.passed === true;
+          if (report?.candidateId !== candidate.id || report?.candidateHash !== candidate.candidateHash || report?.sourceCommit !== payloadWorktree.baseCommit) {
+            throw new PolicyError("Payload build report is not bound to the current candidate and pinned source", "STALE_REVISION");
+          }
+          if (!passed) throw new PolicyError("Payload sandbox build did not pass", "BUILD_FAILED");
+          if (latestCandidate(run)?.id !== candidate.id || store.candidates.get(candidate.id)?.candidateHash !== candidate.candidateHash) {
+            throw new PolicyError("Candidate changed while its Payload build was running", "STALE_CANDIDATE");
+          }
+          const receipt = Object.freeze({
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            passed: true,
+            reportHash: report?.reportHash || report?.build?.reportHash || crypto.createHash("sha256").update(JSON.stringify(report)).digest("hex"),
+            sourceCommit: report.sourceCommit,
+            buildState: report?.buildState || "sandbox_build_passed",
+            report,
+            builtAt: new Date().toISOString(),
+          });
+          candidate.payloadBuild = receipt;
+          run.checkpoint = "payload_build_passed";
+          store.event(run.id, "payload.candidate.built", { candidateId: candidate.id, candidateHash: candidate.candidateHash, reportHash: receipt.reportHash, sourceCommit: receipt.sourceCommit });
+          store.persist?.();
+          return send(res, 201, { candidate, build: receipt });
+        } catch (error) {
+          store.event(run.id, "payload.candidate.build.failed", { candidateId: candidate.id, candidateHash: candidate.candidateHash, code: error.code || "BUILD_FAILED", reason: error.message });
+          store.persist?.();
+          throw error;
+        }
       }
       const answersMatch = url.pathname.match(/^\/runs\/([^/]+)\/answers$/);
       if (req.method === "POST" && answersMatch) {
@@ -1175,7 +1187,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
           input.contentByPage = model.contentByPage;
         }
         if (autoPlan) {
-          if (!candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          if (!candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
           if (!run?.strategy) return send(res, 422, { code: "STRATEGY_REQUIRED" });
           plan = createPayloadDraftPlan({
             strategy: run.strategy,
@@ -1301,8 +1313,10 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
         const run = store.runs.get(candidate.runId);
         if (!run || latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
-        if (candidate.cmsSnapshot && !candidate.build?.passed) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
-        const report = await quality.run({ ...(await readJson(req)), candidateId: candidate.id, candidateHash: candidate.candidateHash });
+        if (candidate.build?.requiresPayloadBuild === true && !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+        const input = await readJson(req);
+        if (candidate.payloadBuild?.passed === true && previewSessions.has(input.qaPreviewId)) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+        const report = await quality.run({ ...input, candidateId: candidate.id, candidateHash: candidate.candidateHash });
         if (report.candidateId !== candidate.id || report.candidateHash !== candidate.candidateHash) {
           throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
         }
@@ -1332,7 +1346,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       }
       return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
     } catch (error) {
-      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" || error.code === "PAYLOAD_BUILD_NOT_CONFIGURED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code === "BUILD_GATE_REQUIRED" || error.code === "BUILD_FAILED" || error.code?.startsWith("GRANT_") ? 422 : 400;
+      const status = error.code === "RESOURCE_NOT_FOUND" ? 404 : error.code === "STALE_CANDIDATE" ? 409 : error.code === "SANDBOX_REQUIRED" || error.code === "CONFIG_REQUIRED" || error.code === "PAYLOAD_BUILD_NOT_CONFIGURED" ? 503 : error.code === "POLICY_DENIED" || error.code === "INVALID_INPUT" || error.code === "NEEDS_INPUT" || error.code === "TEMPLATE_CAPABILITY_MISSING" || error.code === "STALE_REVISION" || error.code === "SCHEMA_REJECTED" || error.code === "CMS_INVALID_RECEIPT" || error.code === "CMS_REJECTED" || error.code === "IDEMPOTENCY_CONFLICT" || error.code === "REVIEW_GATE_REQUIRED" || error.code === "BUILD_GATE_REQUIRED" || error.code === "BUILD_FAILED" || error.code?.startsWith("GRANT_") ? 422 : 400;
       return send(res, status, { code: error.code || "INVALID_INPUT", message: error.message });
     }
   });

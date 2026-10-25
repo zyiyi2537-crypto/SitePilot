@@ -8,6 +8,7 @@ let designDraft = null;
 let currentRun = null;
 let currentCandidate = null;
 let currentPreview = null;
+let qaPreviewCandidateHash = null;
 let intakePreview = null;
 let selectedDesignPage = "";
 let selectedDesignComponent = "";
@@ -123,6 +124,9 @@ async function showRun() {
   designDraft = designResult.designs.at(-1) || null;
   const { candidates } = await api("GET", "/candidates");
   currentCandidate = run.candidateIds?.length ? candidates.find((candidate) => candidate.id === run.candidateIds.at(-1)) || null : null;
+  const selectedCandidateHash = currentCandidate?.candidateHash || null;
+  if (selectedCandidateHash !== qaPreviewCandidateHash) $("#qa-preview-id").value = "";
+  qaPreviewCandidateHash = selectedCandidateHash;
   if (currentCandidate?.contentModel) {
     $("#payload-content").value = JSON.stringify(currentCandidate.contentModel.contentByPage || {}, null, 2);
     $("#payload-content").readOnly = true;
@@ -179,6 +183,8 @@ function renderDelivery(result) {
       designHash: result.candidate.revision?.designHash || null,
       cmsSnapshotId: result.candidate.cmsSnapshot?.cmsSnapshotId || null,
       buildPassed: Boolean(result.candidate.build?.passed),
+      requiresPayloadBuild: result.candidate.build?.requiresPayloadBuild === true,
+      payloadBuildPassed: Boolean(result.candidate.payloadBuild?.passed && result.candidate.payloadBuild?.candidateHash === result.candidate.candidateHash),
       qaPassed: Boolean(result.candidate.quality?.passed),
     } } : result;
     if (view?.generated) delete view.generated;
@@ -187,14 +193,25 @@ function renderDelivery(result) {
   const hasPlan = Boolean(currentRun?.pagePlan && designDraft);
   const alreadyGenerated = currentRun?.candidateIds?.some((id) => currentCandidate?.id === id && currentCandidate.designDraftId === designDraft?.id);
   const isCurrentCandidate = Boolean(currentCandidate && currentCandidate.designDraftId === currentRun?.designDraftId);
+  const payloadBuildRequired = currentCandidate?.build?.requiresPayloadBuild === true;
+  const payloadBuildReady = !payloadBuildRequired || currentCandidate?.payloadBuild?.passed === true && currentCandidate.payloadBuild.candidateHash === currentCandidate.candidateHash;
+  const qaPreviewId = $("#qa-preview-id").value.trim();
+  const localPreviewSelected = Boolean(currentPreview && qaPreviewId === currentPreview.sessionId);
+  const qaPreviewReady = isCurrentCandidate && (payloadBuildRequired
+    ? payloadBuildReady && Boolean(qaPreviewId) && !localPreviewSelected
+    : Boolean(currentPreview) && qaPreviewId === currentPreview.sessionId);
+  const hasPayloadWorktree = Boolean(currentRun?.payloadWorktree);
+  const hasL2Credentials = Boolean($("#review-token").value.trim() && $("#l2-token").value.trim());
+  $("#prepare-payload").disabled = !runId || !hasPlan || hasPayloadWorktree || !hasL2Credentials;
   $("#create-candidate").disabled = !hasPlan || Boolean(alreadyGenerated);
-  $("#generate-content").disabled = !isCurrentCandidate || !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot);
+  $("#build-payload-candidate").disabled = !isCurrentCandidate || !payloadBuildRequired || !hasPayloadWorktree || payloadBuildReady || !hasL2Credentials;
+  $("#generate-content").disabled = !isCurrentCandidate || !payloadBuildReady || Boolean(currentCandidate.cmsSnapshot);
   const contentApprovalRequired = currentRun?.contentModel?.status === "proposed" && currentRun.contentModel.candidateId === currentCandidate?.id;
   const contentApproved = currentCandidate?.contentApproval?.contentHash === currentRun?.contentModel?.contentHash;
-  $("#approve-content").disabled = !contentApprovalRequired || contentApproved || !currentCandidate?.build?.passed;
+  $("#approve-content").disabled = !contentApprovalRequired || contentApproved || !payloadBuildReady;
   const codePatch = currentRun?.codingPatch?.candidateHash === currentCandidate?.candidateHash ? currentRun.codingPatch : null;
   const codePatchApproved = Boolean(codePatch && currentRun?.codePatchApproval?.codePatchHash === codePatch.codePatchHash);
-  $("#generate-code-plan").disabled = !isCurrentCandidate || !currentCandidate?.build?.passed || !contentApproved || Boolean(codePatch);
+  $("#generate-code-plan").disabled = !isCurrentCandidate || !payloadBuildReady || !contentApproved || Boolean(codePatch);
   $("#approve-code-plan").disabled = !codePatch || codePatch.status !== "proposed" || codePatchApproved;
   $("#execute-code-plan").disabled = !codePatchApproved || Boolean(currentRun?.codePatchExecution?.childCandidateId);
   const codeReview = $("#code-patch-review");
@@ -209,13 +226,14 @@ function renderDelivery(result) {
     risks: codePatch.risks,
     executionGranted: currentRun?.codePatchApproval?.executionGranted === true,
   }, null, 2);
-  $("#create-payload").disabled = !currentCandidate?.build?.passed || Boolean(currentCandidate.cmsSnapshot) || !$("#content-reviewed").checked || (contentApprovalRequired && !contentApproved);
-  $("#start-preview").disabled = !currentCandidate?.build?.passed;
-  $("#run-qa").disabled = !currentCandidate || !currentPreview;
+  $("#create-payload").disabled = !payloadBuildReady || Boolean(currentCandidate?.cmsSnapshot) || !$("#content-reviewed").checked || (contentApprovalRequired && !contentApproved);
+  $("#start-preview").disabled = !currentCandidate?.build?.passed || payloadBuildRequired && payloadBuildReady;
+  $("#run-qa").disabled = !qaPreviewReady;
   if (!currentCandidate) status.textContent = hasPlan ? "设计已就绪，可以生成代码候选。" : "需要先生成页面计划和设计草稿。";
   else {
     const codeStatus = codePatchApproved ? "代码方案已审核（未授予执行权）" : codePatch ? "代码方案待审核" : null;
-    status.textContent = `候选 ${currentCandidate.id} · ${currentCandidate.cmsSnapshot ? "含 Payload 草稿" : "代码候选"} · QA ${currentCandidate.quality?.passed ? "通过" : "待运行"}${codeStatus ? ` · ${codeStatus}` : ""}`;
+    const buildStatus = payloadBuildRequired ? payloadBuildReady ? "Payload 构建通过" : "Payload 构建待运行" : "仅结构检查";
+    status.textContent = `候选 ${currentCandidate.id} · ${currentCandidate.cmsSnapshot ? "含 Payload 草稿" : "代码候选"} · ${buildStatus} · QA ${currentCandidate.quality?.passed ? "通过" : "待运行"}${codeStatus ? ` · ${codeStatus}` : ""}`;
   }
 }
 
@@ -459,6 +477,34 @@ $("#create-candidate").onclick = () => action(async () => {
   await showRun();
   renderDelivery({ candidate: result.candidate, build: result.build });
 });
+$("#prepare-payload").onclick = () => action(async () => {
+  if (!runId) throw new Error("请先选择项目 Run");
+  if (!$("#review-token").value.trim() || !$("#l2-token").value.trim()) {
+    $("#review-token-field").style.display = "grid";
+    $("#l2-token-field").style.display = "grid";
+    throw new Error("准备 Payload worktree 需要审核与 L2 凭据");
+  }
+  const grant = await api("POST", `/runs/${encodeURIComponent(runId)}/grants`, { tool: "prepare_payload_template", expiresAt: new Date(Date.now() + 60_000).toISOString() }, "reviewer");
+  await api("POST", `/runs/${encodeURIComponent(runId)}/payload-prepare`, { grantId: grant.id }, "l2");
+  await showRun();
+  return "固定版本的 Payload worktree 已准备；生成候选后还需单独授权候选构建";
+});
+$("#build-payload-candidate").onclick = () => action(async () => {
+  if (!currentCandidate) throw new Error("请先生成候选");
+  if (!$("#review-token").value.trim() || !$("#l2-token").value.trim()) {
+    $("#review-token-field").style.display = "grid";
+    $("#l2-token-field").style.display = "grid";
+    throw new Error("Payload 候选构建需要审核与 L2 凭据");
+  }
+  const grant = await api("POST", `/runs/${encodeURIComponent(runId)}/grants`, { tool: "build_payload_candidate", candidateId: currentCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() }, "reviewer");
+  const result = await api("POST", `/candidates/${encodeURIComponent(currentCandidate.id)}/payload-build`, { grantId: grant.id }, "l2");
+  currentCandidate = result.candidate;
+  currentPreview = null;
+  $("#qa-preview-id").value = "";
+  await showRun();
+  renderDelivery({ candidate: result.candidate, payloadBuild: result.build });
+  return "Payload 候选构建通过；QA 仍必须使用实际 Payload 预览，而不是本地结构预览";
+});
 $("#generate-content").onclick = () => action(async () => {
   if (!runId || !currentCandidate?.build?.passed) throw new Error("请先生成通过构建门禁的候选");
   $("#content-reviewed").checked = false;
@@ -528,20 +574,34 @@ $("#create-payload").onclick = () => action(async () => {
 });
 $("#start-preview").onclick = () => action(async () => {
   if (!currentCandidate) throw new Error("请先生成候选");
+  if (currentCandidate.build?.requiresPayloadBuild === true && currentCandidate.payloadBuild?.passed === true) throw new Error("该候选已完成 Payload 构建；请使用真实 Payload preview ID 运行 QA");
   currentPreview = await api("POST", "/candidates/" + encodeURIComponent(currentCandidate.id) + "/preview", {});
   $("#qa-preview-id").value = currentPreview.sessionId;
   renderDelivery({ candidate: currentCandidate, preview: currentPreview, previewType: "local-read-only" });
 });
 $("#run-qa").onclick = () => action(async () => {
-  if (!currentCandidate || !currentPreview) throw new Error("请先启动该候选的本地预览");
+  if (!currentCandidate) throw new Error("请先生成候选");
+  const requiresPayloadBuild = currentCandidate.build?.requiresPayloadBuild === true;
+  const payloadBuildReady = currentCandidate.payloadBuild?.passed === true && currentCandidate.payloadBuild.candidateHash === currentCandidate.candidateHash;
+  let qaPreviewId = $("#qa-preview-id").value.trim();
+  if (requiresPayloadBuild) {
+    if (!payloadBuildReady) throw new Error("请先构建当前 Payload 候选");
+    if (!qaPreviewId) throw new Error("请输入服务端已登记的真实 Payload preview ID");
+    if (currentPreview?.sessionId === qaPreviewId) throw new Error("结构预览不能用于 Payload 候选 QA");
+  } else {
+    if (!currentPreview) throw new Error("请先启动该候选的结构预览");
+    if (!qaPreviewId) qaPreviewId = currentPreview.sessionId;
+    if (qaPreviewId !== currentPreview.sessionId) throw new Error("结构候选只能使用当前启动的预览运行 QA");
+  }
   const report = await api("POST", "/candidates/" + encodeURIComponent(currentCandidate.id) + "/qa", {
-    qaPreviewId: $("#qa-preview-id").value.trim() || currentPreview.sessionId,
+    qaPreviewId,
     routes: currentRun?.pagePlan?.routes.map((route) => route.route) || ["/"],
     locales: currentRun?.inputSnapshot?.locale || ["en"],
   });
   currentCandidate.quality = { passed: report.passed, reportHash: report.reportHash, candidateHash: report.candidateHash };
-  renderDelivery({ candidate: currentCandidate, preview: currentPreview, qa: report, previewType: "local-read-only" });
+  renderDelivery({ candidate: currentCandidate, preview: currentPreview, qa: report, previewType: requiresPayloadBuild ? "payload-preview" : "local-structural-preview" });
 });
+$("#qa-preview-id").addEventListener("input", () => renderDelivery());
 
 $("#project-form").onsubmit = (event) => { event.preventDefault(); action(async () => {
   const requestText = new FormData(event.target).get("requestText").trim();

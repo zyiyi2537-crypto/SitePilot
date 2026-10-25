@@ -76,7 +76,7 @@ export class PayloadBuildPipeline {
     const install = await installer.install({ worktreePath: worktree.repositoryPathRef, packageManager: "pnpm", lockHash: { file: "pnpm-lock.yaml", sha256: lockHash }, workspaceFilter: "website...", grant });
     const executor = new BuildExecutor({ worktreeRoot: root, sandbox, approvedScripts: { "website-build": { command: "pnpm", args: ["--filter", "website", "build"] } } });
     const build = await executor.run({ candidateId, worktreePath: worktree.repositoryPathRef, commit: lock.commit, approvedScriptIds: ["website-build"], grant, timeoutMs: 15 * 60 * 1000 });
-    return Object.freeze({ candidateId, sourceCommit: lock.commit, lockHash, install, build, buildState: "sandbox_build_passed" });
+    return Object.freeze({ candidateId, candidateHash: candidateHash || null, sourceCommit: lock.commit, lockHash, install, build, buildState: "sandbox_build_passed" });
   }
 
   async git(args) {

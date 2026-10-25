@@ -226,6 +226,10 @@ test("Payload create flow seals a CMS child candidate before QA", async () => {
   const blocked = await request(server, "POST", `/candidates/${missingBuildCandidate.id}/payload-draft`, token, { contentByPage: {} });
   assert.equal(blocked.status, 422);
   assert.equal(blocked.body.code, "BUILD_GATE_REQUIRED");
+  const missingPayloadBuildCandidate = store.createCandidate(run.id, { designDraftId: design.id, codeArtifact: { head: "static-only" }, build: { passed: true, requiresPayloadBuild: true } });
+  const blockedPayloadBuild = await request(server, "POST", `/candidates/${missingPayloadBuildCandidate.id}/payload-draft`, token, { contentByPage: {} });
+  assert.equal(blockedPayloadBuild.status, 422);
+  assert.equal(blockedPayloadBuild.body.code, "BUILD_GATE_REQUIRED");
 
   const draft = await request(server, "POST", `/candidates/${parent.id}/payload-draft`, token, {
     expectedCmsSnapshot: "cms_0",
@@ -363,9 +367,9 @@ test("generation API uses server-owned worktree and frozen CodeAtlas files", asy
   assert.equal(preview.body.localOnly, true);
   assert.equal(registeredPreviews.get(preview.body.sessionId).candidateHash, generated.body.candidate.candidateHash);
   const qa = await request(server, "POST", `/candidates/${generated.body.candidate.id}/qa`, token, { qaPreviewId: preview.body.sessionId, routes: ["/"], locales: ["en"] });
-  assert.equal(qa.status, 200);
-  assert.equal(qa.body.candidateHash, generated.body.candidate.candidateHash);
-  assert.equal(store.candidates.get(generated.body.candidate.id).quality.passed, true);
+  assert.equal(qa.status, 422);
+  assert.equal(qa.body.code, "BUILD_GATE_REQUIRED");
+  assert.equal(store.candidates.get(generated.body.candidate.id).quality, null);
   const previewResponse = await fetch(preview.body.baseUrl);
   assert.equal(previewResponse.status, 200);
   assert.match(await previewResponse.text(), new RegExp(`data-sitepilot-design-hash="${design.body.designHash}"`));
@@ -530,16 +534,18 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   const auth = { apiToken: "a".repeat(32), reviewerToken: "b".repeat(32), l2Token: "c".repeat(32), reviewerId: "reviewer" };
   let buildCalls = 0;
   let buildMode = "pass";
+  const quality = { run: async ({ candidateId, candidateHash, qaPreviewId }) => ({ candidateId, candidateHash, qaPreviewId, passed: true, reportHash: "payload-qa-report", results: [] }) };
   const payloadBuild = {
     worktreeRoot: root,
     build: async ({ candidateId, candidateHash }) => {
       buildCalls += 1;
       if (buildMode === "fail") return { candidateId, candidateHash, sourceCommit: commit, build: { passed: false, reportHash: "failed-report" } };
+      if (buildMode === "wrong-hash") return { candidateId, candidateHash: "wrong-hash", sourceCommit: commit, build: { passed: true, reportHash: "wrong-hash-report" } };
       return { candidateId, candidateHash, sourceCommit: commit, build: { passed: true, reportHash: "passed-report" } };
     },
   };
   const grants = new GrantStore();
-  const server = createServer(store, auth, undefined, undefined, null, null, null, null, grants, payloadBuild);
+  const server = createServer(store, auth, undefined, undefined, null, null, quality, null, grants, payloadBuild);
   const makeCandidate = () => store.createCandidate(run.id, {
     codeArtifact: { payloadWorktree: { baseCommit: commit, repositoryPathRef: `${project.id}/${run.id}/worktree` } },
     build: { passed: true, requiresPayloadBuild: true, mode: "static-scaffold" },
@@ -578,6 +584,10 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(built.body.build.candidateHash, candidate.candidateHash);
   assert.equal(store.candidates.get(candidate.id).payloadBuild.candidateHash, candidate.candidateHash);
   assert.equal(buildCalls, 1);
+  const qa = await request(server, "POST", `/candidates/${candidate.id}/qa`, auth.apiToken, { qaPreviewId: "payload-preview-registered-on-server", routes: ["/"], locales: ["en"] });
+  assert.equal(qa.status, 200);
+  assert.equal(qa.body.qaPreviewId, "payload-preview-registered-on-server");
+  assert.equal(store.candidates.get(candidate.id).quality.passed, true);
 
   const replay = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: grant.body.id });
   assert.equal(replay.status, 200);
@@ -592,6 +602,14 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(failed.status, 422);
   assert.equal(failed.body.code, "BUILD_FAILED");
   assert.equal(store.candidates.get(failedCandidate.id).payloadBuild, null);
+
+  buildMode = "wrong-hash";
+  const mismatchedCandidate = makeCandidate();
+  const mismatchedGrant = await request(server, "POST", `/runs/${run.id}/grants`, auth.reviewerToken, { tool: "build_payload_candidate", candidateId: mismatchedCandidate.id, expiresAt: new Date(Date.now() + 60_000).toISOString() });
+  const mismatched = await request(server, "POST", `/candidates/${mismatchedCandidate.id}/payload-build`, auth.l2Token, { grantId: mismatchedGrant.body.id });
+  assert.equal(mismatched.status, 422);
+  assert.equal(mismatched.body.code, "STALE_REVISION");
+  assert.equal(store.candidates.get(mismatchedCandidate.id).payloadBuild, null);
 
   const stale = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: "missing" });
   assert.equal(stale.status, 409);
