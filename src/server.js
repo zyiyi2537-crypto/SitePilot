@@ -174,6 +174,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   };
   const latestCandidate = (run) => run?.candidateIds?.length ? store.candidates.get(run.candidateIds.at(-1)) : null;
   const stopPayloadPreviews = async (candidateId) => {
+    const candidate = store.candidates.get(candidateId);
+    const registeredPreviewId = candidate?.payloadPreview?.previewId;
     for (const [previewId, session] of payloadPreviewSessions) {
       if (session.candidateId !== candidateId) continue;
       clearTimeout(session.timer);
@@ -181,7 +183,7 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
       quality?.preview?.unregisterPreview?.(previewId);
       await session.stop?.();
     }
-    const candidate = store.candidates.get(candidateId);
+    if (registeredPreviewId) quality?.preview?.unregisterPreview?.(registeredPreviewId);
     if (candidate?.payloadPreview) candidate.payloadPreview = Object.freeze({ ...candidate.payloadPreview, stoppedAt: new Date().toISOString() });
   };
   const candidateBuildReady = (candidate) => candidate?.build?.passed === true
@@ -929,6 +931,13 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         store.event(candidate.runId, "payload.preview.stopped", { candidateId: candidate.id, candidateHash: candidate.candidateHash });
         store.persist?.();
         return send(res, 200, { candidateId: candidate.id, stopped: true });
+      }
+      if (req.method === "GET" && payloadPreviewMatch) {
+        const candidate = store.candidates.get(payloadPreviewMatch[1]);
+        if (!candidate) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+        const preview = candidate.payloadPreview;
+        const active = Boolean(preview && !preview.stoppedAt && preview.expiresAt > Date.now() && (payloadPreviewSessions.has(preview.previewId) || quality?.preview?.hasPreview?.(preview.previewId) === true));
+        return send(res, 200, { candidateId: candidate.id, candidateHash: candidate.candidateHash, previewId: preview?.previewId || null, expiresAt: preview?.expiresAt ? new Date(preview.expiresAt).toISOString() : null, active, localOnly: true, writesAllowed: false });
       }
       if (req.method === "POST" && payloadPreviewMatch) {
         if (!quality?.preview || typeof quality.preview.registerPreview !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });

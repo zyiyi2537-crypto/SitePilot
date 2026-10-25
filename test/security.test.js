@@ -623,6 +623,12 @@ test("candidate Payload builds are hash-bound, isolated and required for packagi
   assert.equal(registeredQa.status, 200);
   assert.equal(registeredQa.body.qaPreviewId, preview.body.previewId);
   assert.equal(store.candidates.get(candidate.id).quality.passed, true);
+  const previewStatus = await request(server, "GET", `/candidates/${candidate.id}/payload-preview`, auth.apiToken);
+  assert.equal(previewStatus.status, 200);
+  assert.equal(previewStatus.body.active, true);
+  const stoppedManualPreview = await request(server, "DELETE", `/candidates/${candidate.id}/payload-preview`, auth.apiToken);
+  assert.equal(stoppedManualPreview.status, 200);
+  assert.equal(registeredPreviews.has(preview.body.previewId), false);
 
   const replay = await request(server, "POST", `/candidates/${candidate.id}/payload-build`, auth.l2Token, { grantId: grant.body.id });
   assert.equal(replay.status, 200);
