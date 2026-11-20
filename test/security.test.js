@@ -877,7 +877,7 @@ test("local preview exposes the bound design revision and component props", asyn
     assert.equal(response.status, 200);
     assert.match(html, /data-sitepilot-design-hash="hash_preview_1"/);
     assert.match(html, /data-sitepilot-design-id="design_preview_1"/);
-    assert.match(html, /<h1>A precise homepage<\/h1>/);
+    assert.match(html, /<h1[^>]*>A precise homepage<\/h1>/);
     assert.match(html, /A reviewed value proposition/);
     assert.match(html, /data:text\/css;charset=utf-8/);
     assert.match(response.headers.get("content-security-policy"), /style-src data:/);

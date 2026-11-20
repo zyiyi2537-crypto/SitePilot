@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { SitePilotStore } from "../src/core.js";
 import { createServer } from "../src/server.js";
 import { renderDesignPreviewDocument, renderDesignPreviewStylesheet } from "../src/design-preview.js";
+import { createCanvasPatch } from "../src/grapes-patch.js";
 
 function draft(overrides = {}) {
   return {
@@ -24,7 +25,7 @@ function draft(overrides = {}) {
 test("design preview renders the selected page with bounded tokens and mapped components", () => {
   const html = renderDesignPreviewDocument({ designDraft: draft(), page: "home", locale: "en", audience: "buyers" });
   const css = renderDesignPreviewStylesheet({ designDraft: draft() });
-  assert.match(html, /<h1>Welcome &lt;script&gt;alert\(1\)&lt;\/script&gt;<\/h1>/);
+  assert.match(html, /<h1[^>]*>Welcome &lt;script&gt;alert\(1\)&lt;\/script&gt;<\/h1>/);
   assert.match(html, /Product A/);
   assert.match(html, /data-instance="hero_1"/);
   assert.match(html, /default-src 'none'/);
@@ -61,6 +62,40 @@ test("invalid or empty drafts produce no preview document", () => {
   assert.equal(renderDesignPreviewDocument({ designDraft: { pageTree: [] } }), "");
 });
 
+test("visual editor output is converted into bounded props and move operations", () => {
+  const page = draft().pageTree[0];
+  const result = createCanvasPatch({
+    page,
+    expectedDesignHash: "a".repeat(64),
+    components: [
+      { instanceId: "products_1", fields: { title: "Products", itemTitle: ["Edited product"], itemDescription: ["Approved copy"] } },
+      { instanceId: "hero_1", fields: { title: "New headline", description: "New lead", ctaLabel: "Talk to us" } },
+    ],
+  });
+  assert.deepEqual(result.operations, [
+    { op: "replace_props", page: "home", componentId: "products_1", props: { items: [{ title: "Edited product", description: "Approved copy" }], title: "Products" } },
+    { op: "replace_props", page: "home", componentId: "hero_1", props: { title: "New headline", description: "New lead", ctaLabel: "Talk to us" } },
+    { op: "move", page: "home", componentId: "products_1", toIndex: 0 },
+  ]);
+});
+
+test("editing a list keeps the original item shape and unrelated entries", () => {
+  const props = { items: ["unchanged", { question: "Old?", answer: "Yes", source: "approved" }] };
+  const page = { page: "home", components: [{ instanceId: "faq", props }] };
+  const components = [{ instanceId: "faq", fields: { itemTitle: { 1: "New?" } } }];
+  const { operations } = createCanvasPatch({ page, components, expectedDesignHash: "a".repeat(64) });
+  assert.deepEqual(operations[0].props.items, ["unchanged", { question: "New?", answer: "Yes", source: "approved" }]);
+  assert.equal(props.items[1].question, "Old?");
+});
+
+test("visual editor rejects unknown components, fields and unsafe text", () => {
+  const page = draft().pageTree[0];
+  const base = { page, expectedDesignHash: "a".repeat(64), components: page.components.map((component) => ({ instanceId: component.instanceId, fields: {} })) };
+  assert.throws(() => createCanvasPatch({ ...base, components: [{ instanceId: "unknown", fields: {} }, base.components[1]] }), /outside the approved/);
+  assert.throws(() => createCanvasPatch({ ...base, components: [{ instanceId: "hero_1", fields: { style: "color:red" } }, base.components[1]] }), /not editable/);
+  assert.throws(() => createCanvasPatch({ ...base, components: [{ instanceId: "hero_1", fields: { title: "javascript:alert(1)" } }, base.components[1]] }), /unsafe/);
+});
+
 test("Studio serves the design renderer as a same-origin module and permits only blob frames", async () => {
   const server = createServer(new SitePilotStore());
   const get = (url) => new Promise((resolve, reject) => {
@@ -71,7 +106,7 @@ test("Studio serves the design renderer as a same-origin module and permits only
     };
     try { server.emit("request", req, res); } catch (error) { reject(error); }
   });
-  const [studio, renderer] = await Promise.all([get("/studio"), get("/design-preview.js")]);
+  const [studio, renderer, grapesModule, patchModule] = await Promise.all([get("/studio"), get("/design-preview.js"), get("/grapesjs.mjs"), get("/grapes-patch.js")]);
   assert.equal(studio.status, 200);
   assert.match(studio.body, /type="module" src="\/studio\.js"/);
   assert.match(studio.headers["content-security-policy"], /frame-src blob:/);
@@ -79,4 +114,8 @@ test("Studio serves the design renderer as a same-origin module and permits only
   assert.equal(renderer.status, 200);
   assert.match(renderer.headers["content-type"], /javascript/);
   assert.match(renderer.body, /renderDesignPreviewDocument/);
+  assert.equal(grapesModule.status, 200);
+  assert.match(grapesModule.body, /grapesjs/);
+  assert.equal(patchModule.status, 200);
+  assert.match(patchModule.body, /createCanvasPatch/);
 });

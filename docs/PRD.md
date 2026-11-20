@@ -65,7 +65,7 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 自然语言目标
   → RequirementBrief 与少量澄清
   → SiteStrategy / PagePlan / DesignTokens
-  → 受限组件画布初步设计（Puck 通过验证后采用，否则用轻量替代）
+  → 受限组件画布初步设计（GrapesJS 组件模型与 SitePilot 预览渲染器）
   → CodeAtlas 组件证据与 ComponentPlan
   → Payload 区块映射、CMS 草稿与 worktree 代码
   → 固定候选构建和桌面/移动预览
@@ -77,17 +77,17 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 
 **第二步：形成初步设计。** Architect 根据 `RequirementBrief` 和证据生成 `SiteStrategy`、`PagePlan`、`DesignTokens`、响应式规则和交互状态。没有设计稿时，系统可以生成 `design-incomplete` 的初步方案；该标记只说明仍有视觉细节待确认，不阻止生成演示预览。系统应先提供一个能打开的首页或关键页面，而不是在资料不完整时无限等待。设计方案必须能回链到需求、证据和待确认项，并允许客户逐项修改。
 
-**第三步：用受限画布让客户看到设计。** 优先验证 Puck 是否适合作为可嵌入的 React 页面画布，用于把 `PagePlan` 和已登记的 Block Registry 区块快速呈现为桌面/手机设计草稿；许可证、兼容性或安全边界未通过前，它仍是候选，不算已集成依赖。无论采用 Puck 还是轻量替代实现，画布都不是最终 CMS 或任意 HTML/JS 执行器：它只能使用已登记组件、受控 props、设计 token 和允许的布局规则；客户拖动或调整后产生结构化 `CanvasPatch`，不能直接写入任意源码。画布版本保存为 `DesignDraft`，同时记录组件 ID、属性、响应式规则、待确认项和输入快照。
+**第三步：用受限画布让客户看到设计。** Studio 按 `PagePlan` 和已审核组件渲染草稿。客户可以切换页面和视口、点选标记文案、在同页上移或下移区块；保存产生带原设计 hash 的 `CanvasPatch`，服务端创建不可变 `DesignDraft`。GrapesJS 仅管理会话内的区块和字段修改；不导入任意 HTML/CSS/JS，不从画布直接写源码或 CMS。
 
 **第四步：把设计映射成真实工程。** Research Agent 通过 CodeAtlas 检索固定提交的模板、组件、Payload schema、依赖和测试证据。SitePilot 先核对许可证、版本、依赖和兼容性，再将画布中的组件 ID 映射为 Payload `layout` 区块或当前项目的 React 组件。已有组件优先复用；没有合适组件时，Coding Agent 才在项目隔离 worktree 的白名单路径编写或适配代码。画布配置不是最终交付代码，Payload 页面和前端代码才是运行时来源；两者必须通过稳定的区块 schema 和映射记录保持一致。
 
-**第五步：生成真实预览。** Content/CMS Agent 将已确认的客户资料写入 Payload 沙箱草稿，Coding Agent 提交对应代码候选，系统把代码 commit、锁文件、CMS snapshot、来源清单和 `DesignDraft` 绑定为一个 `CandidateRevision`。构建和预览必须使用该候选的真实 Payload 工程，不以 Puck 画布截图或静态 HTML 代替。构建成功后运行桌面/手机 Playwright、链接、表单、SEO、无障碍和必要的人工视觉检查；失败则保留失败候选，不移动上一稳定预览指针。
+**第五步：生成真实预览。** Content/CMS Agent 将已确认的客户资料写入 Payload 沙箱草稿，Coding Agent 提交对应代码候选，系统把代码 commit、锁文件、CMS snapshot、来源清单和 `DesignDraft` 绑定为一个 `CandidateRevision`。构建和预览必须使用该候选的真实 Payload 工程，不以 设计画布截图或静态 HTML 代替。构建成功后运行桌面/手机 Playwright、链接、表单、SEO、无障碍和必要的人工视觉检查；失败则保留失败候选，不移动上一稳定预览指针。
 
 **第六步：接受反馈并生成下一版。** 客户可以输入“导航改成产品分类下拉”“首页留白多一点”“产品详情增加参数表”，也可以在画布上选中一个区块提出意见。系统先将反馈定位到需求、设计区块、CMS 字段、代码文件或质量问题，再选择内容更新、`CanvasPatch`、代码补丁或澄清问题。每次有意义的修改都创建新的 `GoalRevision`/`CandidateRevision`，重新执行受影响检查并生成新的预览；旧版本和旧 CMS snapshot 保留，可整体回滚，不能只回滚代码而留下不匹配的内容。
 
 **第七步：人工收口。** 预览可以反复迭代，但只有构建、质量检查、来源审查和独立 Review 全部通过后，`package_review` 才能创建正式 `DraftVersion`。项目负责人批准的是一个绑定代码、CMS、依赖和证据 hash 的可审阅版本，不等于生产发布。生产合并、部署、域名、数据迁移和删除不属于这条自动流程。
 
-若 Puck 通过许可证、兼容性和渲染一致性验证，它承担“快速看设计、改结构、收集反馈”的受限画布职责；否则采用轻量受控画布。无论选择哪种方案，Payload 都是内容模型、草稿和最终网站运行底座，SitePilot Agent 负责需求理解、证据检索、组件选择、代码/CMS 修改、构建和质量闭环。第一版不同时维护一套独立的 HTML 设计系统和一套 Payload 设计系统。
+设计草稿复用 SitePilot 的预览渲染器，GrapesJS 管理受限编辑状态。Payload 负责内容、草稿与最终网站运行；Agent 负责证据、组件选择和代码/CMS 修改。设计画布与 Payload 候选的一致性仍须通过真实构建验证。
 
 它不是“输入一句话就生成网页”的聊天机器人，也不是把固定脚本包一层大模型。核心价值是：
 
@@ -106,7 +106,7 @@ Payload Website Template 的原生 `src/app/(frontend)/page.tsx`、`[slug]/page.
 | CodeAtlas | 独立提供代码、项目文档和 Wiki 的解析、索引、权限过滤及引用检索；作为可复用代码知识库，为代理提供固定 commit 的模板、组件、CMS schema、测试和依赖证据 | 生成客户业务事实、代替 SitePilot 决策或向 Agent 暴露 CodeAtlas 写入权限 |
 | Payload | 保存自建的页面、产品、案例、表单配置和多语言草稿 | 接入任职公司的 CMS 或自动批准交付 |
 | Payload Website Template | 提供 Next.js、Payload、页面区块、草稿/预览、SEO 和表单的基础工程 | 替代 Agent 的策略选择；未知来源代码必须先经过复用审查 |
-| Puck（受限画布候选） | 技术验证通过后，将已登记 React 区块组合为可交互设计草稿 | 尚未作为已集成依赖；许可证、Payload 兼容性和安全评估通过前不进入正式依赖 |
+| GrapesJS（受限画布） | 以 0.23.8 无界面组件模型管理已审核区块、文案及顺序 | BSD-3-Clause；仅通过 CanvasPatch 保存，不能把画布导出当成发布物 |
 | Playwright / Lighthouse | 验证页面交互、响应式、表单和质量，保存检查证据 | 把一次通过当作上线许可 |
 | Umami | 可选地核验独立沙箱中的测试事件 | 读取真实客户埋点、证明真实询盘增长 |
 
@@ -192,7 +192,7 @@ MVP 必须跑通：
 
 1. 客户只提供一段自然语言目标也能开始；系统生成结构化 `RequirementBrief`，资料不足时提出最多三个关键澄清问题。
 2. 生成可审阅的 `SiteStrategy`、`PagePlan`、`DesignTokens` 和首个可查看的 `DesignDraft`；没有 Figma 时也能生成明确标注待确认项的初步设计。
-3. 在 Puck 许可证、依赖、安全与 Payload 区块映射评估通过后，用受限画布预览已登记区块；若评估不通过，使用 SitePilot 自己的结构化 PagePlan 预览，不把 Puck 当成项目阻断条件。
+3. 用 Studio 受限画布预览已登记区块；真实交付需验证这些区块在 Payload 中的映射和渲染。
 4. 导入一个虚构客户资料包和一个公开/演示网站；合成资料在项目专属 CodeAtlas collection 中检索，并由 SitePilot 保存来源快照和 Claim 关系。V0 管理员导入，自动导入须等待受限接口。
 5. 通过只读 CodeAtlas MCP 检索已登记区块和候选，记录仓库、提交、路径和符号证据；新候选经许可证、依赖和沙箱适配审查后才可复用。
 6. 将设计草稿中的已登记区块映射为 Payload layout，在项目 worktree 编写/适配页面与组件，并写入 Payload 沙箱 CMS。
@@ -404,7 +404,7 @@ Architect 必须先输出可审阅的 SiteStrategy，再允许 Coding 开工。S
 
 多代理基础采用固定版本的 Pi `@earendil-works/pi-agent-core` / `pi-ai`：复用其模型调用、agent loop、生命周期事件和工具执行钩子；Pi 的 coding-agent CLI 不作为产品界面。`pi-durable` 目前为实验 API，先验证兼容性再决定是否用于持久任务。Pi 不是权限边界，SitePilot 的工具注册、L0/L1/L2 授权、CodeAtlas 白名单、worktree 沙箱、审批与审计始终生效。当前实现了 Supervisor→Architect→Research、ContentCMS、Coding 提案和独立 Review 阶段；Review `changes_requested` 后可通过 `phase: repair` 重新委派只读 Coding。Coding 必须绑定原候选、源码 head、ReviewDecision hash，并为每个 finding 提供 findingIndexes；服务端把 CodePatch 转为受限 repair manifest，Reviewer 仍需单次 L2 grant 才能执行。执行会生成全新的 child CandidateRevision，不继承旧 QA、Review、ContentModel、Content approval 或 CMS snapshot；每个 child 都必须重新生成/审批内容、重新 QA 和 Review，最多三轮返修，之后转人工。返修生成阶段当前只做 manifest/页面文件结构校验，不代表真实 Payload 构建。OpenHands 仅在 Pi 无法满足受限代码执行需求时再评估，不为“多代理”引入整套重型服务。
 
-自然语言到设计草稿的第一版实现不引入通用拖拽建站器。Puck 只作为受限画布依赖候选：SitePilot 自己定义组件白名单、props schema、设计 token、响应式规则和序列化版本；画布的保存、差异、权限、审计和候选版本仍由 SitePilot 管理。若 Puck 与当前 Payload 区块无法保持同一渲染结果，优先缩小画布能力而不是维护第二套渲染实现。
+第一版采用 GrapesJS 无界面组件模型。SitePilot 管理字段白名单、token、序列化、权限和版本；任意模板拖入和通用富文本编辑不在本期范围内。
 
 示例：
 
@@ -741,7 +741,7 @@ SitePilot 不采用“左侧菜单 + KPI 卡片 + 中间聊天框”的普通后
 Studio Canvas 是客户创建和修改首版设计的主工作区，不是聊天记录页。页面顶部始终显示当前目标、策略版本、设计版本和待确认事项；主体采用“需求与证据 / 设计画布 / 版本反馈”三栏：
 
 1. **需求与证据**：展示 RequirementBrief、客户资料 Claim、设计建议、缺口与来源；建议/推断不得显示成已确认事实。
-2. **响应式设计画布**：用受限 Puck 候选组件即时预览首页/页面，可切换桌面/平板/手机、locale、页面版本和交互状态；只显示当前 Block Registry 的组件与 schema 允许的属性。
+2. **响应式设计画布**：通过同一预览渲染器显示登记区块，可切换页面和桌面/平板/手机尺寸；历史版本只读。
 3. **版本与反馈**：提供自然语言反馈输入、选中区块注释、候选 diff、构建/QA 状态、上一稳定预览和恢复入口。
 
 客户可以输入“导航改成产品分类下拉”或选中 Hero 说“手机上标题太挤”。系统先显示识别到的目标区块与拟修改内容，再执行；范围扩张、事实变化或目标冲突时先澄清。开发者可展开 Decision Ledger 查看 observation → decision → action → result，但不展示隐式思维链。
@@ -1339,7 +1339,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 | 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板；Studio 已支持版本历史、字段差异摘要和受控自然语言反馈到 CanvasPatch | 接通受审组件到初步页面预览，并验证真实候选反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
 | Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。候选级 Payload 构建接口已要求绑定 worktree、candidate hash 和一次性 `build_payload_candidate` grant，生成阶段会写入受控 Payload 文件并生成漂移检测清单，成功回执才允许 `packageReview`。尚无真实在线模型多角色运行记录 | 用真实 Docker/固定镜像跑通该绑定候选，再接 QA 与独立 Review |
-| Puck 与 Payload 区块映射、客户画布修改 | 尚未集成；当前仅为候选方向 | 先做小型技术验证并核对许可 |
+| 客户画布修改与 Payload 区块映射 | 本地 Chrome 已验收改文案、区块排序、创建新版和旧候选失效 | 用新草稿构建真实 Payload 候选，验证页面顺序与字段 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |
 
@@ -1356,11 +1356,11 @@ CI 合成数据成功、代码模块存在或结构检查通过，均不等于�
 - Architect 产出 `SiteStrategy`、`PagePlan`、`DesignTokens`、responsive rules 和 `open_questions`；
 - 用 Hero、ProductGrid、ContactForm 等已审查区块生成 `DesignDraft`，并在 Studio 的隔离只读 iframe 中按同一组登记区块渲染设计方向；
 - 设计预览支持页面切换、桌面/平板/手机视口、组件目标选择和色板/间距摘要；客户文本必须转义，预览不加载脚本、不提交表单、不执行外部组件源码；
-- 对 Puck 做隔离技术验证：核验许可证、React/Next 兼容、受限区块渲染、序列化/恢复、Payload schema 映射与样式复用；验证通过才作为正式画布依赖，否则用轻量受控页面预览保持产品进度；
+- 验证画布修改后创建的新候选在 Payload 中保持登记区块、排序与文案；
 - 画布/自然语言修改只生成 schema 校验过的 `CanvasPatch`，不执行任意 HTML/JS、不直接落盘源码；当前自然语言解释器只覆盖可审计的文案、主色和全站间距词汇，超出范围必须澄清；
 - 设计草稿版本、目标版本和证据版本冻结，可在 Studio 回看、比较并复现；只有当前版本可继续反馈。
 
-出口标准：从一条自然语言需求生成首页草稿；桌面、平板和手机方向预览由同一组登记区块渲染；客户能提出至少一次自然语言修改，产生新的可审阅 `DesignDraft` 和差异；缺失产品参数不被编造；设计预览与最终 Payload 候选的边界清晰；Puck 或替代方案选择有许可、兼容性和复现证据。
+出口标准：从一条自然语言需求生成首页草稿；桌面、平板和手机方向预览由同一组登记区块渲染；客户能提出至少一次自然语言修改，产生新的可审阅 `DesignDraft` 和差异；缺失产品参数不被编造；设计预览与最终 Payload 候选的边界清晰；画布方案选择有许可、兼容性和复现证据。
 
 ### 21.3 后续迭代：把设计接入 Payload 与真实代码候选
 
@@ -1369,7 +1369,7 @@ CI 合成数据成功、代码模块存在或结构检查通过，均不等于�
 - 通过隔离 worktree 让 Coding Agent 对缺失组件和行为写 React/Payload 代码及测试；
 - 以 Payload sandbox 真实写入客户内容草稿，并把 design hash、代码 commit、锁文件、CMS snapshot 和来源清单绑为候选；
 - 在 GitHub Actions 或独立构建 runner 做依赖安装、构建和 Playwright QA，避免挤占 SitePilot/CodeAtlas 小型服务器资源；
-- 生成限定访问、可过期的预览地址与截图/报告；预览必须来自真实 Payload 候选，不能以 Puck mock 或静态 HTML 代替；
+- 生成限定访问、可过期的预览地址与截图/报告；预览必须来自真实 Payload 候选，不能以 画布模拟页面 或静态 HTML 代替；
 - 出口：自然语言需求 → 设计 → 代码/CMS → 构建 → 浏览器验收 → 可打开预览的完整合成数据垂直切片。
 
 ### 21.4 后续迭代：客户反馈、版本与交付

@@ -45,18 +45,18 @@ function safeTokens(value = {}) {
 
 function renderItems(items, locale, defaults) {
   const values = Array.isArray(items) ? items.slice(0, 6) : [];
-  const normalized = values.map((item) => {
-    if (typeof item === "string") return { title: textValue(item), description: "" };
+  const normalized = values.map((item, index) => {
+    if (typeof item === "string") return { index, title: textValue(item), description: "" };
     if (!item || typeof item !== "object" || Array.isArray(item)) return null;
     const title = firstText(item, ["title", "name", "label", "question"], "");
     const description = firstText(item, ["description", "body", "answer", "summary"], "");
-    return title || description ? { title: title || description, description: title ? description : "" } : null;
+    return title || description ? { index, title: title || description, description: title ? description : "" } : null;
   }).filter(Boolean);
   return normalized.length ? normalized : defaults;
 }
 
 function renderCards(items) {
-  return `<div class="preview-card-grid">${items.map((item) => `<article class="preview-card"><h3>${escapeHtml(item.title)}</h3>${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}</article>`).join("")}</div>`;
+  return `<div class="preview-card-grid">${items.map((item, index) => `<article class="preview-card" data-sp-item-index="${item.index ?? index}"><h3 data-sp-field="itemTitle">${escapeHtml(item.title)}</h3>${item.description ? `<p data-sp-field="itemDescription">${escapeHtml(item.description)}</p>` : ""}</article>`).join("")}</div>`;
 }
 
 function renderComponent(component, locale, context) {
@@ -69,39 +69,39 @@ function renderComponent(component, locale, context) {
   const description = (fallback) => escapeHtml(firstText(props, ["description", "subtitle", "body", "summary"], fallback));
 
   if (["hero", "herobanner", "masthead"].includes(lower)) {
-    return `<section class="preview-hero" ${marker}><p class="preview-eyebrow">${escapeHtml(firstText(props, ["eyebrow", "overline"], zh ? "品牌介绍" : "ABOUT THE BRAND"))}</p><h1>${heading(zh ? `${context.audience || "理想客户"}，从这里开始` : `A better starting point for ${context.audience || "your next decision"}`)}</h1><p class="preview-lead">${description(context.businessGoal || (zh ? "围绕清晰的业务目标，呈现品牌、产品与可信信息。" : "A clear introduction to your brand, offer, and the value you bring."))}</p><span class="preview-button">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel", "cta"], context.primaryConversion || (zh ? "了解更多" : "Learn more")))}</span></section>`;
+    return `<section class="preview-hero" ${marker}><p class="preview-eyebrow" data-sp-field="eyebrow">${escapeHtml(firstText(props, ["eyebrow", "overline"], zh ? "品牌介绍" : "ABOUT THE BRAND"))}</p><h1 data-sp-field="title">${heading(zh ? `${context.audience || "理想客户"}，从这里开始` : `A better starting point for ${context.audience || "your next decision"}`)}</h1><p class="preview-lead" data-sp-field="description">${description(context.businessGoal || (zh ? "围绕清晰的业务目标，呈现品牌、产品与可信信息。" : "A clear introduction to your brand, offer, and the value you bring."))}</p><span class="preview-button" data-sp-field="ctaLabel">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel", "cta"], context.primaryConversion || (zh ? "了解更多" : "Learn more")))}</span></section>`;
   }
 
   if (["productgrid", "featuregrid", "casegrid", "contentgrid"].includes(lower)) {
     const fallbackTitle = lower === "productgrid" ? (zh ? "产品与服务" : "Products and services") : lower === "casegrid" ? (zh ? "客户案例" : "Selected work") : lower === "featuregrid" ? (zh ? "为你创造的价值" : "Built around your needs") : (zh ? "深入了解" : "Explore more");
     const fallbackItems = (zh ? ["核心方案", "专业能力", "服务支持"] : ["Core offering", "Expertise", "Ongoing support"]).map((title) => ({ title, description: zh ? "具体内容待客户确认" : "Details pending customer approval" }));
-    return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "为你准备" : "WHAT WE OFFER")}</p><h2>${heading(fallbackTitle)}</h2><p>${description(zh ? "突出最重要的服务内容与实际价值。" : "A focused view of the services and value that matter most.")}</p></div>${renderCards(renderItems(props.items, locale, fallbackItems))}</section>`;
+    return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "为你准备" : "WHAT WE OFFER")}</p><h2 data-sp-field="title">${heading(fallbackTitle)}</h2><p data-sp-field="description">${description(zh ? "突出最重要的服务内容与实际价值。" : "A focused view of the services and value that matter most.")}</p></div>${renderCards(renderItems(props.items, locale, fallbackItems))}</section>`;
   }
 
   if (lower === "pricing") {
     const items = renderItems(props.items, locale, (zh ? ["基础方案", "成长方案", "企业方案"] : ["Starter", "Growth", "Enterprise"]).map((title) => ({ title, description: zh ? "价格与方案内容待确认" : "Pricing and plan details pending approval" })));
-    return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "合作方式" : "WAYS TO WORK TOGETHER")}</p><h2>${heading(zh ? "选择适合你的方案" : "Choose the right plan")}</h2></div>${renderCards(items)}</section>`;
+    return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "合作方式" : "WAYS TO WORK TOGETHER")}</p><h2 data-sp-field="title">${heading(zh ? "选择适合你的方案" : "Choose the right plan")}</h2></div>${renderCards(items)}</section>`;
   }
 
   if (lower === "faq") {
     const items = renderItems(props.items, locale, [{ title: zh ? "常见问题待确认" : "Questions to be confirmed", description: zh ? "客户常见问题与答案将在内容确认后补充。" : "Customer questions and approved answers will be added after review." }]);
-    return `<section class="preview-section preview-faq" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">FAQ</p><h2>${heading(zh ? "你可能想了解" : "Frequently asked questions")}</h2></div>${items.map((item) => `<article class="preview-faq-item"><h3>${escapeHtml(item.title)}</h3>${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}</article>`).join("")}</section>`;
+    return `<section class="preview-section preview-faq" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">FAQ</p><h2 data-sp-field="title">${heading(zh ? "你可能想了解" : "Frequently asked questions")}</h2></div>${items.map((item, index) => `<article class="preview-faq-item" data-sp-item-index="${item.index ?? index}"><h3 data-sp-field="itemTitle">${escapeHtml(item.title)}</h3>${item.description ? `<p data-sp-field="itemDescription">${escapeHtml(item.description)}</p>` : ""}</article>`).join("")}</section>`;
   }
 
   if (["technicalproof", "proof", "trustbar"].includes(lower)) {
     const items = renderItems(props.items, locale, (zh ? ["技术能力", "质量标准", "客户支持"] : ["Technical capability", "Quality standards", "Customer support"]).map((title) => ({ title, description: zh ? "证据与数据待核实" : "Evidence and supporting data pending review" })));
-    return `<section class="preview-section preview-proof" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "可信依据" : "THE PROOF")}</p><h2>${heading(zh ? "以可核实的实力建立信任" : "Proof that earns trust")}</h2></div>${renderCards(items)}</section>`;
+    return `<section class="preview-section preview-proof" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "可信依据" : "THE PROOF")}</p><h2 data-sp-field="title">${heading(zh ? "以可核实的实力建立信任" : "Proof that earns trust")}</h2></div>${renderCards(items)}</section>`;
   }
 
   if (["contactform", "contact", "inquiry"].includes(lower)) {
-    return `<section class="preview-section preview-contact" id="contact" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "下一步" : "NEXT STEP")}</p><h2>${heading(zh ? "联系我们" : "Talk with our team")}</h2><p>${description(zh ? "询盘表单内容待确认；此为不可提交的设计预览。" : "The inquiry form is a non-submitting design preview; content is pending approval.")}</p></div><div class="preview-form"><label>${escapeHtml(zh ? "姓名" : "Name")}<span></span></label><label>${escapeHtml(zh ? "工作邮箱" : "Work email")}<span></span></label><label>${escapeHtml(zh ? "需求说明" : "How can we help?")}<span class="preview-form-message"></span></label><span class="preview-button">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel"], zh ? "提交前待配置" : "Submit action pending"))}</span></div></section>`;
+    return `<section class="preview-section preview-contact" id="contact" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "下一步" : "NEXT STEP")}</p><h2 data-sp-field="title">${heading(zh ? "联系我们" : "Talk with our team")}</h2><p data-sp-field="description">${description(zh ? "询盘表单内容待确认；此为不可提交的设计预览。" : "The inquiry form is a non-submitting design preview; content is pending approval.")}</p></div><div class="preview-form"><label>${escapeHtml(zh ? "姓名" : "Name")}<span></span></label><label>${escapeHtml(zh ? "工作邮箱" : "Work email")}<span></span></label><label>${escapeHtml(zh ? "需求说明" : "How can we help?")}<span class="preview-form-message"></span></label><span class="preview-button" data-sp-field="ctaLabel">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel"], zh ? "提交前待配置" : "Submit action pending"))}</span></div></section>`;
   }
 
   if (["cta", "calltoaction"].includes(lower)) {
-    return `<section class="preview-cta" ${marker}><div><p class="preview-eyebrow">${escapeHtml(zh ? "准备开始了吗" : "READY WHEN YOU ARE")}</p><h2>${heading(zh ? "一起规划下一步" : "Let's plan the next step")}</h2><p>${description(zh ? "以清晰的行动引导客户联系或了解更多。" : "Give visitors a clear next step to continue the conversation.")}</p></div><span class="preview-button">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel", "cta"], context.primaryConversion || (zh ? "联系我们" : "Contact us")))}</span></section>`;
+    return `<section class="preview-cta" ${marker}><div><p class="preview-eyebrow">${escapeHtml(zh ? "准备开始了吗" : "READY WHEN YOU ARE")}</p><h2 data-sp-field="title">${heading(zh ? "一起规划下一步" : "Let's plan the next step")}</h2><p data-sp-field="description">${description(zh ? "以清晰的行动引导客户联系或了解更多。" : "Give visitors a clear next step to continue the conversation.")}</p></div><span class="preview-button" data-sp-field="ctaLabel">${escapeHtml(firstText(props, ["ctaLabel", "buttonLabel", "cta"], context.primaryConversion || (zh ? "联系我们" : "Contact us")))}</span></section>`;
   }
 
-  return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "页面内容" : "PAGE CONTENT")}</p><h2>${heading(zh ? name : name.replace(/([a-z])([A-Z])/g, "$1 $2"))}</h2><p>${description(zh ? "此区块的内容与细节待客户确认。" : "Content and details for this section are pending customer approval.")}</p></div></section>`;
+  return `<section class="preview-section" ${marker}><div class="preview-section-heading"><p class="preview-eyebrow">${escapeHtml(zh ? "页面内容" : "PAGE CONTENT")}</p><h2 data-sp-field="title">${heading(zh ? name : name.replace(/([a-z])([A-Z])/g, "$1 $2"))}</h2><p data-sp-field="description">${description(zh ? "此区块的内容与细节待客户确认。" : "Content and details for this section are pending customer approval.")}</p></div></section>`;
 }
 
 export function renderDesignPreviewStylesheet({ designDraft } = {}) {

@@ -20,3 +20,5 @@ The template package identifies itself as `Website template for Payload` and pro
 - Reviewed packages: `packages/agent`, `packages/durable`, `packages/protocol`, `packages/ai`
 - Usage: architecture reference only at this stage; no Pi source is copied into the product and no Pi dependency is installed yet.
 - Adopted ideas: durable tool intent, replay policy, checkpointed task graph, immutable entries, atomic commits and event streaming. See `docs/PI-ADOPTION.md`.
+
+- [GrapesJS](https://github.com/GrapesJS/grapesjs), npm `grapesjs@0.23.8`, BSD-3-Clause (license shipped in the package). Studio loads the local module on demand for its headless component model. No CDN, remote storage or telemetry; SitePilot owns the preview renderer and versioned patch format.

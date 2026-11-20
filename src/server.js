@@ -279,10 +279,12 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
   const server = http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url, "http://localhost");
-      if (req.method === "GET" && ["/studio", "/studio.css", "/studio-delivery.css", "/studio.js", "/design-preview.js"].includes(url.pathname)) {
-        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio-delivery.css": "studio-delivery.css", "/studio.js": "studio.js", "/design-preview.js": "design-preview.js" }[url.pathname];
-        const type = file.endsWith("html") ? "text/html" : file.endsWith("css") ? "text/css" : "text/javascript";
-        const content = await fs.readFile(new URL(`./${file}`, import.meta.url));
+      if (req.method === "GET" && url.pathname === "/favicon.ico") { res.writeHead(204); return res.end(); }
+      if (req.method === "GET" && ["/studio", "/studio.css", "/studio-delivery.css", "/studio.js", "/design-preview.js", "/grapes-patch.js", "/grapesjs.mjs"].includes(url.pathname)) {
+        const file = { "/studio": "studio.html", "/studio.css": "studio.css", "/studio-delivery.css": "studio-delivery.css", "/studio.js": "studio.js", "/design-preview.js": "design-preview.js", "/grapes-patch.js": "grapes-patch.js" }[url.pathname];
+        const packageFile = { "/grapesjs.mjs": "../node_modules/grapesjs/dist/grapes.mjs" }[url.pathname];
+        const type = (file || packageFile).endsWith("html") ? "text/html" : (file || packageFile).endsWith("css") ? "text/css" : "text/javascript";
+        const content = await fs.readFile(file ? new URL(`./${file}`, import.meta.url) : new URL(packageFile, import.meta.url));
         res.writeHead(200, { "content-type": `${type}; charset=utf-8`, "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self' data:; connect-src 'self'; img-src 'self'; frame-src blob:; base-uri 'none'; form-action 'self'", "cache-control": "no-store", "x-content-type-options": "nosniff" });
         return res.end(content);
       }

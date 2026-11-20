@@ -1,4 +1,5 @@
 import { renderDesignPreviewDocument, renderDesignPreviewStylesheet } from "./design-preview.js";
+import { extractCanvasComponents, createCanvasPatch } from "./grapes-patch.js";
 
 const $ = (selector) => document.querySelector(selector);
 const node = (tag, text, className) => { const item = document.createElement(tag); if (text !== undefined) item.textContent = String(text); if (className) item.className = className; return item; };
@@ -17,6 +18,9 @@ let selectedDesignComponent = "";
 let designViewport = "desktop";
 let activePreviewUrls = new Set();
 const previewUrls = new Set();
+let visualEditor = null;
+let visualEditorContext = null;
+let canvasSession = 0;
 
 function notice(message, error = false) {
   const target = $("#notice");
@@ -114,6 +118,7 @@ async function loadPayloadStatus() {
 }
 
 async function selectProject(id, reloadList = true) {
+  if (visualEditor) await stopCanvasEditor({ render: false });
   projectId = id;
   const { runs } = await api("GET", `/projects/${encodeURIComponent(id)}/runs`);
   runId = runs.at(-1)?.id || null;
@@ -278,6 +283,7 @@ function renderDesignDraft() {
     status.textContent = "页面计划生成后创建首版设计。";
     target.textContent = "设计草稿会在这里显示。";
     feedback.hidden = true;
+    $("#toggle-canvas-edit").disabled = true;
     $("#design-version").replaceChildren();
     $("#design-diff").replaceChildren();
     return;
@@ -379,6 +385,182 @@ function renderDesignDraft() {
     $("#design-props").value = "";
   };
   feedback.hidden = !isCurrentDraft;
+  const canvasToggle = $("#toggle-canvas-edit");
+  canvasToggle.disabled = !isCurrentDraft || Boolean(visualEditor);
+  canvasToggle.hidden = Boolean(visualEditor);
+}
+
+async function stopCanvasEditor({ render = true } = {}) {
+  if (visualEditor) {
+    try { visualEditor.destroy(); } catch { /* The canvas may already be unloaded. */ }
+  }
+  visualEditor = null;
+  if (visualEditorContext?.url) URL.revokeObjectURL(visualEditorContext.url);
+  visualEditorContext = null;
+  canvasSession++;
+  const frame = $("#canvas-frame");
+  frame.onload = null;
+  frame.removeAttribute("src");
+  $("#grapes-editor-shell").hidden = true;
+  $("#design-preview").hidden = false;
+  $("#canvas-edit-status").textContent = "";
+  $("#save-canvas-edit").disabled = true;
+  $("#canvas-text-edit").value = "";
+  $("#canvas-text-edit").disabled = true;
+  $("#apply-canvas-text").disabled = true;
+  $(".design-history-bar").hidden = false;
+  $("#design-diff").hidden = false;
+  $("#create-design").disabled = !currentRun?.pagePlan;
+  $("#toggle-canvas-edit").hidden = false;
+  if (render) renderDesignDraft();
+}
+
+async function startCanvasEditor() {
+  if (!designDraft || viewedDesignDraftId !== designDraft.id) throw new Error("只能编辑当前设计版本");
+  const page = designDraft.pageTree.find((item) => item.page === selectedDesignPage) || designDraft.pageTree[0];
+  if (!page) throw new Error("当前设计没有可编辑页面");
+  await stopCanvasEditor({ render: false });
+  const status = $("#canvas-edit-status");
+  status.textContent = "正在加载可视化画布…";
+  const session = canvasSession;
+  const draft = designDraft;
+  const { default: grapesjs } = await import("/grapesjs.mjs");
+  if (session !== canvasSession || designDraft !== draft) return;
+  const documentHtml = renderDesignPreviewDocument({
+    designDraft,
+    page: page.page,
+    locale: currentRun?.inputSnapshot?.locale?.[0] || "zh-CN",
+    industry: currentRun?.inputSnapshot?.industry,
+    audience: currentRun?.strategy?.audience,
+    primaryConversion: currentRun?.strategy?.primaryConversion,
+    businessGoal: currentRun?.strategy?.businessGoal,
+  });
+  const baseline = extractCanvasComponents(documentHtml);
+  const editor = grapesjs.init({
+    headless: true, autorender: false, storageManager: false, telemetry: false, cssIcons: "", richTextEditor: { custom: true },
+    components: baseline.map(({ instanceId }) => ({ tagName: "section", instanceId, fields: {} })),
+  });
+  const blocks = editor.getWrapper().components();
+  const input = $("#canvas-text-edit");
+  const apply = $("#apply-canvas-text");
+  const up = $("#canvas-move-up"), down = $("#canvas-move-down");
+  const save = $("#save-canvas-edit"), picker = $("#canvas-page-select");
+  const frame = $("#canvas-frame");
+  const css = renderDesignPreviewStylesheet({ designDraft }) +
+    "[data-sp-field]{cursor:text}[data-sp-active]{outline:2px solid #267553;outline-offset:3px}[data-sp-block-active]{box-shadow:inset 3px 0 #267553}";
+  const html = documentHtml.replace("__SITEPILOT_PREVIEW_STYLESHEET__", () => "data:text/css;charset=utf-8," + encodeURIComponent(css));
+  const url = URL.createObjectURL(new Blob([html], { type: "text/html;charset=utf-8" }));
+  let block, section, field;
+  const entries = () => blocks.map(m => {
+    const base = baseline.find(b => b.instanceId === m.get("instanceId"));
+    return { instanceId: base.instanceId, fields: m.get("fields"), baseItems: base.baseItems };
+  });
+  const patch = () => createCanvasPatch({ page, components: entries(), expectedDesignHash: draft.designHash, feedback: "可视化编辑器修改", actor: "customer" });
+  function sync() {
+    const index = blocks.indexOf(block);
+    up.disabled = index < 1;
+    down.disabled = index < 0 || index === blocks.length - 1;
+    input.disabled = !field;
+    const pending = Boolean(field && field.textContent !== input.value);
+    apply.disabled = !pending;
+    // A page switch would discard its unsaved changes.
+    const dirty = blocks.some((m, i) => m.get("instanceId") !== baseline[i].instanceId || Object.keys(m.get("fields")).length > 0);
+    picker.disabled = dirty || pending;
+    save.disabled = !dirty || pending;
+  }
+  function select(target) {
+    if (field && input.value !== field.textContent && target !== field) {
+      notice("请先应用当前文案，再选择其他位置", true);
+      return;
+    }
+    const next = target.closest("main > [data-instance]");
+    const model = next && blocks.find(m => m.get("instanceId") === next.dataset.instance);
+    field?.removeAttribute("data-sp-active");
+    section?.removeAttribute("data-sp-block-active");
+    section = model ? next : null;
+    block = model;
+    field = model ? target.closest("[data-sp-field]") : null;
+    section?.setAttribute("data-sp-block-active", "");
+    field?.setAttribute("data-sp-active", "");
+    input.value = field?.textContent || "";
+    sync();
+  }
+  frame.onload = () => {
+    const doc = frame.contentDocument;
+    if (session !== canvasSession || doc?.URL !== url) return;
+    for (const el of doc.querySelectorAll("[data-sp-field]")) el.tabIndex = 0;
+    doc.addEventListener("click", e => select(e.target));
+    doc.addEventListener("focusin", e => select(e.target));
+    status.textContent = "当前页 · " + page.page;
+  };
+  frame.src = url;
+  input.oninput = sync;
+  apply.onclick = () => action(() => {
+    if (!field || !block) return;
+    const base = baseline.find(b => b.instanceId === block.get("instanceId"));
+    const key = field.dataset.spField, index = field.closest("[data-sp-item-index]")?.dataset.spItemIndex;
+    const value = input.value.trim();
+    if (!value) throw new Error("文案不能为空");
+    const fields = structuredClone(block.get("fields"));
+    if (index !== undefined) {
+      const changes = { ...fields[key], [index]: value };
+      if (value === base.fields[key][index]) delete changes[index];
+      if (Object.keys(changes).length) fields[key] = changes; else delete fields[key];
+    } else if (value === base.fields[key]) delete fields[key]; else fields[key] = value;
+    createCanvasPatch({ page, components: entries().map(item => item.instanceId === base.instanceId ? { ...item, fields } : item), expectedDesignHash: draft.designHash });
+    block.set("fields", fields);
+    field.textContent = input.value = value;
+    sync();
+    return "文案已应用";
+  });
+  function move(offset) {
+    const i = blocks.indexOf(block);
+    const neighbor = blocks.at(i + offset);
+    if (!block || i + offset < 0 || !neighbor) return;
+    const sibling = offset < 0 ? section.previousElementSibling : section.nextElementSibling;
+    if (sibling?.dataset.instance !== neighbor.get("instanceId")) return;
+    // GrapesJS takes an insertion boundary in the pre-move collection.
+    block.move(editor.getWrapper(), { at: offset < 0 ? i - 1 : i + 2 });
+    if (offset < 0) sibling.before(section); else sibling.after(section);
+    sync();
+  }
+  up.onclick = () => move(-1); down.onclick = () => move(1);
+  visualEditor = editor;
+  visualEditorContext = { draft, url, patch };
+  $("#create-design").disabled = true;
+  $(".design-history-bar").hidden = true;
+  $("#design-diff").hidden = true;
+  $("#feedback-form").hidden = true;
+  $("#design-preview").hidden = true;
+  $("#grapes-editor-shell").hidden = false;
+  $("#toggle-canvas-edit").hidden = true;
+  picker.replaceChildren(...draft.pageTree.map(item => {
+    const option = node("option", item.page + " · " + item.route); option.value = item.page; option.selected = item.page === page.page; return option;
+  }));
+  picker.onchange = () => action(async () => { selectedDesignPage = picker.value; await startCanvasEditor(); return "页面已切换"; });
+  const device = $("#canvas-device-select");
+  device.value = "Desktop";
+  device.onchange = () => { frame.className = "design-preview-frame " + device.value.toLowerCase(); };
+  frame.className = "design-preview-frame desktop";
+  sync();
+}
+
+async function saveCanvasEditor() {
+  const context = visualEditorContext;
+  if (!context) throw new Error("可视化画布尚未加载");
+  const patch = context.patch();
+  if (!patch.operations.length) throw new Error("没有检测到受控修改");
+  $("#save-canvas-edit").disabled = true;
+  try {
+    await api("POST", "/design-drafts/" + encodeURIComponent(context.draft.id) + "/patches", patch);
+  } catch (error) {
+    if (context === visualEditorContext) $("#save-canvas-edit").disabled = false;
+    throw error;
+  }
+  if (context !== visualEditorContext) return;
+  await stopCanvasEditor({ render: false });
+  await showRun();
+  setActiveStage("stage-design");
 }
 
 function designValues(draft) {
@@ -386,6 +568,7 @@ function designValues(draft) {
   for (const page of draft?.pageTree || []) for (const component of page.components || []) {
     for (const [key, value] of Object.entries(component.props || {})) values.set(`${page.page} / ${component.name} / ${key}`, JSON.stringify(value));
   }
+  for (const page of draft?.pageTree || []) values.set(page.page + " / 区块顺序", page.components.map(c => c.name + " (" + c.instanceId + ")").join(" → "));
   for (const [group, fields] of Object.entries(draft?.designTokens || {})) for (const [key, value] of Object.entries(fields || {})) values.set(`设计令牌 / ${group} / ${key}`, JSON.stringify(value));
   for (const [index, page] of (draft?.pageTree || []).entries()) values.set(`页面顺序 / ${page.page}`, String(index + 1));
   return values;
@@ -523,6 +706,9 @@ $("#run-agents").onclick = () => action(async () => {
   }
 });
 $("#create-plan").onclick = () => action(async () => { if (!runId) throw new Error("请先选择项目 Run"); await api("POST", `/runs/${encodeURIComponent(runId)}/page-plan`, {}); await showRun(); });
+$("#toggle-canvas-edit").onclick = () => action(async () => { await startCanvasEditor(); return "可视化编辑器已打开"; });
+$("#save-canvas-edit").onclick = () => action(async () => { await saveCanvasEditor(); return "设计已保存为新版本"; });
+$("#cancel-canvas-edit").onclick = () => action(async () => { await stopCanvasEditor(); return "已取消可视化编辑"; });
 $("#create-design").onclick = () => action(async () => {
   if (!runId) throw new Error("请先选择项目 Run");
   await api("POST", `/runs/${encodeURIComponent(runId)}/design-drafts`, {});
