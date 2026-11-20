@@ -126,7 +126,7 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   const run = store.createRun(project.id);
   run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"], strategy: "content-conversion" };
   run.research = { repository: "payload", commit: "a".repeat(40), componentPlan: { decisions: [] }, evidence: [] };
-  run.pagePlan = { sourceManifestHash: "pageplan_hash", routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  run.pagePlan = { sourceManifestHash: "pageplan_hash", routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", props: { title: "Customer revised heading" }, source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
   const design = store.createDesignDraft(run.id);
   const candidate = store.createCandidate(run.id, { designDraftId: design.id, build: { passed: true }, codeArtifact: { designHash: design.designHash } });
   const evidence = new (await import("../src/evidence.js")).EvidenceStore();
@@ -168,6 +168,7 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   assert.deepEqual(result.body.contentModel.contentByPage.home.claimRefs, [claim.id]);
   assert.equal(result.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 1);
   assert.equal(candidate.cmsSnapshot, null);
+  assert.deepEqual(result.body.contentModel.contentByPage.home.blocks, { "home:hero:0": { title: "Customer revised heading" } });
   assert.equal(candidate.contentModel.contentHash, result.body.contentModel.contentHash);
 
   let payloadWrites = 0;

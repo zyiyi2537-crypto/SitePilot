@@ -456,10 +456,11 @@ async function startCanvasEditor() {
     return { instanceId: base.instanceId, fields: m.get("fields"), baseItems: base.baseItems };
   });
   const patch = () => createCanvasPatch({ page, components: entries(), expectedDesignHash: draft.designHash, feedback: "可视化编辑器修改", actor: "customer" });
+  const pinnedHero = page.components[0]?.name === "Hero";
   function sync() {
     const index = blocks.indexOf(block);
-    up.disabled = index < 1;
-    down.disabled = index < 0 || index === blocks.length - 1;
+    up.disabled = index < (pinnedHero ? 2 : 1);
+    down.disabled = index < (pinnedHero ? 1 : 0) || index === blocks.length - 1;
     input.disabled = !field;
     const pending = Boolean(field && field.textContent !== input.value);
     apply.disabled = !pending;
@@ -491,7 +492,7 @@ async function startCanvasEditor() {
     for (const el of doc.querySelectorAll("[data-sp-field]")) el.tabIndex = 0;
     doc.addEventListener("click", e => select(e.target));
     doc.addEventListener("focusin", e => select(e.target));
-    status.textContent = "当前页 · " + page.page;
+    status.textContent = "当前页 · " + page.page + (pinnedHero ? " · 首屏区块固定在第一位" : "");
   };
   frame.src = url;
   input.oninput = sync;
@@ -516,7 +517,7 @@ async function startCanvasEditor() {
   function move(offset) {
     const i = blocks.indexOf(block);
     const neighbor = blocks.at(i + offset);
-    if (!block || i + offset < 0 || !neighbor) return;
+    if (!block || i + offset < 0 || !neighbor || pinnedHero && (i === 0 || i + offset === 0)) return;
     const sibling = offset < 0 ? section.previousElementSibling : section.nextElementSibling;
     if (sibling?.dataset.instance !== neighbor.get("instanceId")) return;
     // GrapesJS takes an insertion boundary in the pre-move collection.

@@ -61,6 +61,7 @@ export function roleSystemPrompt(role) {
     `Allowed tools: ${policy.tools.length ? policy.tools.join(", ") : "none"}.`,
     `Writable outputs: ${policy.writes.join(", ")}.`,
     "Use evidence references and mark missing information as needs_input.",
+    ...(role === "ContentCMS" ? ["Preserve current DesignDraft copy in contentByPage[page].blocks[instanceId] with title and description. Treat this as a proposal for review, never as approval. If copy lacks evidence or the template cannot represent it, return needs_input."] : []),
   ].join(" ");
 }
 

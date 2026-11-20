@@ -1,3 +1,4 @@
+import { designContentBlocks, validateBlockContent, resolvePayloadCopy } from "./design-content.js";
 import crypto from "node:crypto";
 import { createPiTool } from "./agent-tools.js";
 import { createArtifact } from "./agent-roles.js";
@@ -219,7 +220,7 @@ function validateContentModel(contentByPage, { strategy, designDraft, pagePlan, 
     const value = contentByPage[page];
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new PolicyError(`ContentModel page is invalid: ${page}`, "SCHEMA_REJECTED");
     const fields = ["title", "heroTitle", "description", "cta", "metaTitle", "metaDescription"];
-    const allowedFields = new Set([...fields, "claimRefs"]);
+    const allowedFields = new Set([...fields, "claimRefs", "blocks"]);
     if (Object.keys(value).some((field) => !allowedFields.has(field))) throw new PolicyError(`ContentModel contains an unsupported field: ${page}`, "SCHEMA_REJECTED");
     const output = {};
     for (const field of fields) {
@@ -235,6 +236,10 @@ function validateContentModel(contentByPage, { strategy, designDraft, pagePlan, 
     if (refs.some((ref) => typeof ref !== "string" || ref.length < 1 || ref.length > 200)) throw new PolicyError(`ContentModel Claim references are invalid: ${page}`, "SCHEMA_REJECTED");
     if (refs.some((ref) => !claimAllowlist.has(ref))) throw new PolicyError(`ContentModel references an unapproved Claim: ${page}`, "POLICY_DENIED");
     output.claimRefs = refs;
+    const designPage = designDraft.pageTree.find(item => item.page === page);
+    const proposed = value.blocks === undefined ? designContentBlocks(designPage) : validateBlockContent(designPage, value.blocks);
+    if (Object.keys(proposed).length) output.blocks = proposed;
+    resolvePayloadCopy(designPage, output);
     normalized[page] = output;
   }
   return normalized;

@@ -983,7 +983,7 @@ test("Payload draft plan maps ordered DesignDraft components to audited template
     strategy: { pageHierarchy: ["home"], blocks: ["Hero", "Content", "CTA"], locales: ["en"] },
     pagePlan: { routes: [{ page: "home", route: "/", components: plannedComponents }] },
     designDraft,
-    contentByPage: { home: { title: "Home", heroTitle: "Approved heading", description: "Approved copy", cta: "Contact us", claimRefs: ["claim_home"] } },
+    contentByPage: { home: { title: "Home", heroTitle: "Approved heading", description: "Approved copy", cta: "Contact us", claimRefs: ["claim_home"], blocks: { cta_1: { title: "Next step" }, content_1: { title: "Details" } } } },
   });
   assert.deepEqual(plan.operations[0].data.layout.map((block) => block.blockType), ["cta", "content"]);
   assert.deepEqual(plan.designMappings.pages[0].components.map(({ instanceId, payloadTarget }) => [instanceId, payloadTarget]), [["hero_1", "hero"], ["cta_1", "layout[0]"], ["content_1", "layout[1]"]]);

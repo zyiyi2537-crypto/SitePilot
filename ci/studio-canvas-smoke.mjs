@@ -9,7 +9,7 @@ const store = new SitePilotStore();
 const project = store.createProject({ goal: "Visual editing acceptance", industry: "industrial", locale: ["en"] });
 const run = store.createRun(project.id);
 run.strategy = { strategy: "industrial-leadgen", audience: "buyers", primaryConversion: "Contact", businessGoal: "Qualified inquiries", designDirection: "Industrial" };
-run.pagePlan = { routes: [{ page: "home", route: "/", components: ["Hero", "ProductGrid"].map((name, i) => ({
+run.pagePlan = { routes: [{ page: "home", route: "/", components: ["Hero", "ProductGrid", "CTA"].map((name, i) => ({
   instanceId: "section_" + i, name, registryId: "block_" + i,
   source: { repository: "fixture", commit: "a".repeat(40), path: name + ".tsx" },
   props: { title: i ? "Products" : "Original headline" },
@@ -48,8 +48,10 @@ try {
     await input.fill("Custom product");
     await page.locator("#apply-canvas-text").click();
     await title.click();
+    assert.ok(await page.locator("#canvas-move-down").isDisabled());
+    await card.click();
     await page.locator("#canvas-move-down").click();
-    assert.equal(await frame.locator("main > [data-instance]").first().getAttribute("data-instance"), "section_1");
+    assert.deepEqual(await frame.locator("main > [data-instance]").evaluateAll(els => els.map(el => el.dataset.instance)), ["section_0", "section_2", "section_1"]);
     await page.locator("#canvas-device-select").selectOption("Mobile");
     await page.waitForFunction(() => document.querySelector("#canvas-frame").getBoundingClientRect().width <= 400);
     const saved = page.waitForResponse(res => res.url().endsWith("/patches") && res.request().method() === "POST");
@@ -58,9 +60,9 @@ try {
     await page.locator("#design-status").filter({ hasText: "版本 2" }).waitFor();
     const next = store.designs.get(run.designDraftId);
     assert.equal(next.parentId, original.id);
-    assert.deepEqual(next.pageTree[0].components.map(c => c.instanceId), ["section_1", "section_0"]);
-    assert.equal(next.pageTree[0].components[0].props.items[0].title, "Custom product");
-    assert.equal(next.pageTree[0].components[1].props.title, "Revised & approved");
+    assert.deepEqual(next.pageTree[0].components.map(c => c.instanceId), ["section_0", "section_2", "section_1"]);
+    assert.equal(next.pageTree[0].components[2].props.items[0].title, "Custom product");
+    assert.equal(next.pageTree[0].components[0].props.title, "Revised & approved");
     assert.equal(original.pageTree[0].components[0].props.title, "Original headline");
     assert.equal(candidate.status, "superseded");
     await page.locator("#design-version").selectOption(original.id);

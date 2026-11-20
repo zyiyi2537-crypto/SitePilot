@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 
 import { PolicyError } from "./core.js";
+import { resolvePayloadCopy } from "./design-content.js";
 
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en", "en-US", "ja", "de", "fr"]);
 const SAFE_PAGE = /^[a-z][a-z0-9-]{0,63}$/;
@@ -28,26 +29,31 @@ function richText(title, description = "", headingLevel = 1) {
   return { root: { type: "root", children, direction: "ltr", format: "", indent: 0, version: 1 } };
 }
 
-function pageOperation(page, componentNames, locale, content) {
+function pageOperation(page, componentNames, locale, content, designPage) {
   if (typeof page !== "string" || !SAFE_PAGE.test(page)) throw new PolicyError("Payload page slug is invalid", "INVALID_INPUT");
   const blocks = componentNames.map((block) => typeof block === "string" ? block : block?.name).filter(Boolean);
   const unsupported = blocks.filter((block) => !PAYLOAD_BLOCKS[block]);
   if (unsupported.length) throw new PolicyError(`Payload Website Template does not provide approved schema for: ${unsupported.join(", ")}`, "TEMPLATE_CAPABILITY_MISSING");
   if (blocks.filter((block) => block === "Hero").length !== 1 || blocks[0] !== "Hero") throw new PolicyError("Payload Website Template requires exactly one Hero as the first page component", "TEMPLATE_CAPABILITY_MISSING");
   if (!content || typeof content.title !== "string" || !content.title.trim() || typeof content.heroTitle !== "string" || !content.heroTitle.trim() || !Array.isArray(content.claimRefs) || !content.claimRefs.length) throw new PolicyError(`Approved page content and claim references are required: ${page}`, "NEEDS_INPUT");
+  if (!designPage && content.blocks !== undefined) throw new PolicyError("Component copy requires a bound DesignDraft", "SCHEMA_REJECTED");
+  const copyById = designPage ? resolvePayloadCopy(designPage, content) : {};
+  const copyAt = index => copyById[designPage?.components[index]?.instanceId] || {};
+  const heroCopy = copyAt(0);
   const hero = {
     type: "lowImpact",
-    richText: richText(content.heroTitle, content.description || ""),
+    richText: richText(heroCopy.title || content.heroTitle, heroCopy.description ?? content.description ?? ""),
     links: [],
   };
   const layout = [];
-  for (const block of blocks.slice(1)) {
+  for (const [index, block] of blocks.slice(1).entries()) {
+    const copy = copyAt(index + 1);
     if (block === "Content") {
-      if (!content.description?.trim()) throw new PolicyError(`Content block text is required: ${page}`, "NEEDS_INPUT");
-      layout.push({ blockType: "content", columns: [{ size: "full", richText: richText(content.description, "", 2) }] });
+      if (!(copy.title || content.description)?.trim()) throw new PolicyError(`Content block text is required: ${page}`, "NEEDS_INPUT");
+      layout.push({ blockType: "content", columns: [{ size: "full", richText: richText(copy.title || content.description, copy.description || "", 2) }] });
     } else if (block === "CTA") {
-      if (!content.cta?.trim()) throw new PolicyError(`CTA text is required: ${page}`, "NEEDS_INPUT");
-      layout.push({ blockType: "cta", richText: richText(content.cta, "", 2), links: [] });
+      if (!(copy.title || content.cta)?.trim()) throw new PolicyError(`CTA text is required: ${page}`, "NEEDS_INPUT");
+      layout.push({ blockType: "cta", richText: richText(copy.title || content.cta, copy.description || "", 2), links: [] });
     } else if (block === "ProductGrid") {
       const products = Array.isArray(content.products) ? content.products : [];
       if (!products.length) throw new PolicyError(`ProductGrid requires approved products: ${page}`, "NEEDS_INPUT");
@@ -122,7 +128,7 @@ export function createPayloadDraftPlan({ strategy, projectId, locales, contentBy
         throw new PolicyError(`DesignDraft components do not match the strategy blocks: ${page}`, "STALE_REVISION");
       }
     }
-    return pageOperation(page, names, selected[0], contentByPage[page]);
+    return pageOperation(page, names, selected[0], contentByPage[page], designDraft?.pageTree.find(item => item.page === page));
   });
   const designMappings = designDraft ? {
     schemaVersion: "payload-website-block-map-v1",

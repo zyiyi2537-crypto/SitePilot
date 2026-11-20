@@ -137,7 +137,7 @@ try {
   }
   await fs.writeFile('./sitepilot-preview-report.json', JSON.stringify({
     synthetic: true, preview: 'ephemeral GitHub runner only', checks,
-    limitations: ['compile mode only; full type check and production route generation pending', 'no customer input, CodeAtlas retrieval, form or multilingual acceptance in this fixture'],
+    limitations: ['production build and route generation verified; full template TypeScript remains an advisory probe', 'no customer input, CodeAtlas retrieval, form or multilingual acceptance in this fixture'],
   }, null, 2))
   console.log(checks.join('\n'))
 } finally {

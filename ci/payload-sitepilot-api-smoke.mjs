@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 
+import { verifyCanvasPayloadRevision } from "./payload-canvas-revision.mjs";
 import lock from "../sources/payload-website.lock.json" with { type: "json" };
 import { SitePilotStore } from "../src/core.js";
 import { PayloadHttpSandboxBackend, PayloadSandboxAdapter } from "../src/payload-adapter.js";
@@ -122,6 +123,7 @@ try {
   await fs.mkdir(path.dirname(output), { recursive: true });
   await fs.writeFile(output, `${JSON.stringify(receipt, null, 2)}\n`);
   console.log(JSON.stringify(receipt, null, 2));
+  await verifyCanvasPayloadRevision({ store, apiBaseUrl, apiToken, reviewerToken, payloadBaseUrl });
 } finally {
   await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }

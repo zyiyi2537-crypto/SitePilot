@@ -10,6 +10,8 @@ on:
       - src/core.js
       - src/payload-adapter.js
       - src/payload-template.js
+      - src/design-content.js
+      - src/grapes-patch.js
       - package.json
       - sources/payload-website.lock.json
       - test/core.test.js
@@ -183,6 +185,7 @@ jobs:
             exit 1
           fi
           set +e
+          export SITEPILOT_CI_CHROMIUM_EXECUTABLE="$(corepack pnpm exec node -e 'console.log(require("@playwright/test").chromium.executablePath())')"
           node "$GITHUB_WORKSPACE/ci/payload-sitepilot-api-smoke.mjs"
           api_result=$?
           if [ "$api_result" -ne 0 ]; then
@@ -212,6 +215,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: |
+            ci-results/canvas-payload-*
             ci-results/draft-plan.json
             ci-results/sitepilot-payload-api-receipt.json
             payload-source/templates/website/sitepilot-cms-receipt.json
