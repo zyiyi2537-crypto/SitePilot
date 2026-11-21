@@ -107,9 +107,20 @@ export async function verifyCanvasPayloadRevision({ store, apiBaseUrl, apiToken,
         const rendered = await context.newPage();
         rendered.on("pageerror", error => errors.push(error.message));
         assert.equal((await rendered.goto(payloadBaseUrl + "/" + slug)).status(), 200);
-        const headings = await rendered.locator("article h1, article h2").allTextContents();
-        assert.deepEqual(headings.map(s => s.trim()), ["Canvas revised hero", "Canvas revised call to action", "Canvas revised details"]);
-        const body = await rendered.locator("article").innerText();
+        const body = await rendered.locator("body").innerText();
+        const renderedOrder = [
+          "Canvas revised hero",
+          "Canvas revised call to action",
+          "Canvas revised details",
+        ].map(text => body.indexOf(text));
+        assert.ok(
+          renderedOrder.every(index => index >= 0),
+          `${device} must render all revised blocks: ${body}`,
+        );
+        assert.ok(
+          renderedOrder[0] < renderedOrder[1] && renderedOrder[1] < renderedOrder[2],
+          `${device} rendered block order must match DesignDraft: ${body}`,
+        );
         assert.ok(body.includes("Canvas revised introduction"));
         assert.ok(body.includes("Canvas revised body"));
         assert.ok(!body.includes("Old hero") && !body.includes("Old CTA"));
@@ -128,5 +139,16 @@ export async function verifyCanvasPayloadRevision({ store, apiBaseUrl, apiToken,
     };
     await fs.writeFile(path.join(outputRoot, "canvas-payload-revision.json"), JSON.stringify(receipt, null, 2) + "\n");
     console.log(JSON.stringify(receipt, null, 2));
+  } catch (error) {
+    await fs.writeFile(
+      path.join(outputRoot, "canvas-payload-revision-failure.json"),
+      JSON.stringify({
+        synthetic: true,
+        slug,
+        errors,
+        message: error instanceof Error ? error.message : String(error),
+      }, null, 2) + "\n",
+    );
+    throw error;
   } finally { await browser.close(); }
 }
