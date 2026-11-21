@@ -453,8 +453,9 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         if (hasRepository && (!codeAtlas || typeof codeAtlas.search !== "function")) return send(res, 503, { code: "CODEATLAS_NOT_CONFIGURED" });
         if (hasRepository && codeAtlas.repositories instanceof Set && !codeAtlas.repositories.has(input.repository.trim())) return send(res, 403, { code: "REPOSITORY_DENIED" });
         let contentCms = null;
+        let qa = null;
         let review = null;
-        if (input.phase !== undefined && !["content", "coding", "repair", "review"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
+        if (input.phase !== undefined && !["content", "coding", "repair", "qa", "review"].includes(input.phase)) return send(res, 422, { code: "INVALID_AGENT_PHASE" });
         if (input.phase === "content") {
           if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
           const candidate = store.candidates.get(input.candidateId);
@@ -529,6 +530,46 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
             readFiles: source.readFiles,
             sourceRefs: Array.isArray(candidate.sourceRefs) ? candidate.sourceRefs.map((item) => typeof item === "string" ? item : ({ evidenceId: item?.evidenceId || item?.id || null, repository: item?.repository || null, commit: item?.commit || null, path: item?.path || null, licenseReference: item?.licenseReference || null })).filter((item) => typeof item === "string" || item.evidenceId) : [],
             fileCount: source.sourceFiles.length,
+          };
+        }
+        if (input.phase === "qa") {
+          if (typeof input.candidateId !== "string") return send(res, 422, { code: "CANDIDATE_REQUIRED" });
+          if (!quality || typeof quality.run !== "function") return send(res, 503, { code: "QA_NOT_CONFIGURED" });
+          const candidate = store.candidates.get(input.candidateId);
+          if (!candidate || candidate.runId !== run.id) return send(res, 404, { code: "RESOURCE_NOT_FOUND" });
+          if (latestCandidate(run)?.id !== candidate.id) return send(res, 409, { code: "STALE_CANDIDATE" });
+          if (!candidateMatchesCurrentDesign(run, candidate)) return send(res, 409, { code: "STALE_DESIGN_REVISION" });
+          if (candidate.build?.requiresPayloadBuild === true && !candidateBuildReady(candidate)) return send(res, 422, { code: "BUILD_GATE_REQUIRED" });
+          const qaPreviewId = typeof input.qaPreviewId === "string" && input.qaPreviewId.trim() ? input.qaPreviewId.trim() : null;
+          if (candidate.payloadBuild?.passed === true) {
+            if (!qaPreviewId) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+            if (previewSessions.has(qaPreviewId)) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+            const runtimePreview = payloadPreviewSessions.get(qaPreviewId);
+            const registered = runtimePreview?.candidateId === candidate.id
+              && runtimePreview.candidateHash === candidate.candidateHash
+              && runtimePreview.expiresAt > Date.now()
+              || quality?.preview?.matchesPreview?.(qaPreviewId, candidate.candidateHash) === true;
+            if (!registered) return send(res, 422, { code: "PAYLOAD_PREVIEW_REQUIRED" });
+          }
+          qa = {
+            qaOnly: true,
+            candidateId: candidate.id,
+            candidateHash: candidate.candidateHash,
+            candidate,
+            qaPreviewId,
+            routes: Array.isArray(input.routes) ? input.routes.slice(0, 50) : [],
+            locales: Array.isArray(input.locales) ? input.locales.slice(0, 12) : [],
+            input: {
+              ...(qaPreviewId ? { qaPreviewId } : {}),
+              ...(Array.isArray(input.routes) ? { routes: input.routes.slice(0, 50) } : {}),
+              ...(Array.isArray(input.locales) ? { locales: input.locales.slice(0, 12) } : {}),
+            },
+            assertCurrent: async () => {
+              const current = store.candidates.get(candidate.id);
+              if (!current || latestCandidate(run)?.id !== candidate.id || current.candidateHash !== candidate.candidateHash || !candidateMatchesCurrentDesign(run, candidate)) throw new PolicyError("Candidate changed during QA", "STALE_REVISION");
+              return true;
+            },
+            run: async (params) => quality.run(params),
           };
         }
         let repair = null;
@@ -615,8 +656,8 @@ export function createServer(store = new SitePilotStore(), auth = {}, evidence =
         try {
           const modelRuntime = agentModelRuntimeFactory({ ...activeModelConfig, apiKey: activeModelSecret });
           const agentRuntime = new SitePilotAgentRuntime({ modelRuntime, store });
-          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding: coding || repair, review });
-          const agentCandidate = contentCms?.candidate || coding?.candidate || repair?.candidate || review?.candidate;
+          const result = await runCreationSupervisor({ run, runtime: agentRuntime, store, registry, codeAtlas, toolRuntime: createAgentToolRuntime(store, agentToolJournal), repository: hasRepository ? input.repository.trim() : null, expectedCommit: hasCommit ? input.expectedCommit.toLowerCase() : null, grant: { level: "L0" }, contentCms, coding: coding || repair, qa, review });
+          const agentCandidate = contentCms?.candidate || coding?.candidate || repair?.candidate || qa?.candidate || review?.candidate;
           if (agentCandidate && (latestCandidate(run)?.id !== agentCandidate.id || !candidateMatchesCurrentDesign(run, agentCandidate))) {
             if (run.contentModel?.candidateId === agentCandidate.id) run.contentModel = null;
             if (agentCandidate.contentModel?.candidateId === agentCandidate.id) agentCandidate.contentModel = null;

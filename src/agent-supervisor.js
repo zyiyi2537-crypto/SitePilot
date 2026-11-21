@@ -89,6 +89,21 @@ function promptForReview(run, context = {}) {
   });
 }
 
+function promptForQA(run, context = {}) {
+  return JSON.stringify({
+    task: "Run the bounded quality checks for the current candidate preview.",
+    output: "Call run_quality_checks with the exact candidateId and candidateHash supplied by the server. Do not inspect unrelated projects, write files, request grants, modify CMS data, or approve delivery. Return the quality report and stop.",
+    candidate: {
+      id: context.candidateId,
+      candidateHash: context.candidateHash,
+      previewId: context.qaPreviewId || null,
+      routes: context.routes || [],
+      locales: context.locales || [],
+    },
+    requirement: run.inputSnapshot,
+  });
+}
+
 function codePatchHash(patch) {
   const { codePatchHash: omitted, ...canonical } = patch;
   return crypto.createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
@@ -249,7 +264,7 @@ function delegationTool({ name, role, runContext, toolRuntime, handler }) {
   return createPiTool({ role, name, runContext, toolRuntime, handler });
 }
 
-export async function runCreationSupervisor({ run, runtime, store, registry, codeAtlas, toolRuntime, repository, expectedCommit, grant = { level: "L0" }, maxDelegations = 4, contentCms = null, coding = null, review = null } = {}) {
+export async function runCreationSupervisor({ run, runtime, store, registry, codeAtlas, toolRuntime, repository, expectedCommit, grant = { level: "L0" }, maxDelegations = 4, contentCms = null, coding = null, qa = null, review = null } = {}) {
   if (!run?.id || !runtime || !store) throw new PolicyError("Supervisor requires a run, runtime and store", "CONFIG_REQUIRED");
   if (!(store instanceof SitePilotStore) && typeof store.recordArtifact !== "function") throw new PolicyError("Supervisor store does not support artifacts", "CONFIG_REQUIRED");
   toolRuntime = toolRuntime || createAgentToolRuntime(store);
@@ -257,16 +272,19 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
   const contentOnly = contentCms?.contentOnly === true;
   const codingOnly = coding?.codingOnly === true;
   const repairOnly = coding?.repairOnly === true;
+  const qaOnly = qa?.qaOnly === true;
   const reviewOnly = review?.reviewOnly === true;
-  if ([contentOnly, codingOnly, repairOnly, reviewOnly].filter(Boolean).length > 1) throw new PolicyError("ContentCMS, Coding, Repair and Review phases cannot run together", "INVALID_INPUT");
+  if ([contentOnly, codingOnly, repairOnly, qaOnly, reviewOnly].filter(Boolean).length > 1) throw new PolicyError("ContentCMS, Coding, Repair, QA and Review phases cannot run together", "INVALID_INPUT");
   if (contentOnly && (!run.strategy || !run.research)) throw new PolicyError("ContentCMS requires the completed strategy and research stage", "PRECONDITION_REQUIRED");
   if ((codingOnly || repairOnly) && (!run.strategy || !run.research)) throw new PolicyError("Coding requires the completed strategy and research stage", "PRECONDITION_REQUIRED");
+  if (qaOnly && (!qa.candidate || qa.candidateId !== qa.candidate.id || qa.candidateHash !== qa.candidate.candidateHash)) throw new PolicyError("QA requires the current candidate", "PRECONDITION_REQUIRED");
+  if (qaOnly && qa.candidate.build?.requiresPayloadBuild === true && qa.candidate.payloadBuild?.passed !== true) throw new PolicyError("QA requires a successful Payload build", "PRECONDITION_REQUIRED");
   if (reviewOnly && (!review.candidate || !review.quality?.passed)) throw new PolicyError("Review requires the current candidate to pass QA", "PRECONDITION_REQUIRED");
   if (repairOnly && (!coding?.repairDecision || coding.repairDecision.status !== "changes_requested")) throw new PolicyError("Repair Coding requires a changes_requested ReviewDecision", "PRECONDITION_REQUIRED");
-  const state = { strategy: contentOnly || codingOnly || repairOnly ? run.strategy : null, research: contentOnly || codingOnly || repairOnly ? run.research : null, content: null, coding: null, review: null, questions: null, decision: null, decisions: contentOnly || codingOnly || repairOnly || reviewOnly ? [...(run.agentState?.decisions || [])] : [], delegations: 0, evidence: [] };
+  const state = { strategy: contentOnly || codingOnly || repairOnly || qaOnly ? run.strategy : null, research: contentOnly || codingOnly || repairOnly || qaOnly ? run.research : null, content: null, coding: null, qa: null, review: null, questions: null, decision: null, decisions: contentOnly || codingOnly || repairOnly || qaOnly || reviewOnly ? [...(run.agentState?.decisions || [])] : [], delegations: 0, evidence: [] };
   const inputSnapshotId = run.inputSnapshotId || `snapshot:${run.id}`;
   const baseContext = { runId: run.id, inputSnapshotId, grant, requestedScope: { repository: repository || null, expectedCommit: expectedCommit || null } };
-  const priorSupervisorRuns = contentOnly || codingOnly || repairOnly || reviewOnly ? (store.audit || []).filter((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "Supervisor").length : 0;
+  const priorSupervisorRuns = contentOnly || codingOnly || repairOnly || qaOnly || reviewOnly ? (store.audit || []).filter((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "Supervisor").length : 0;
   const supervisorAgentRunId = roleRunId(run.id, "Supervisor", priorSupervisorRuns + 1);
   const recordDecision = (action, input, outputRefs = []) => {
     if (typeof input.whyNow !== "string" || input.whyNow.length < 8 || typeof input.expectedObservation !== "string" || input.expectedObservation.length < 8 || !["low", "medium", "high"].includes(input.risk) || !Array.isArray(input.stopIf)) {
@@ -575,6 +593,75 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     },
   }) : null;
 
+  const delegateQA = qa ? delegationTool({
+    name: "delegate_qa",
+    role: "Supervisor",
+    runContext: { ...baseContext, agentRunId: supervisorAgentRunId },
+    toolRuntime,
+    handler: async (input) => {
+      if (++state.delegations > maxDelegations) throw new PolicyError("Supervisor delegation budget exhausted", "BUDGET_EXHAUSTED");
+      if (!qa.candidate || qa.candidateId !== qa.candidate.id || qa.candidateHash !== qa.candidate.candidateHash) throw new PolicyError("QA requires the current candidate", "PRECONDITION_REQUIRED");
+      if (typeof qa.run !== "function") throw new PolicyError("QA runner is not configured", "CONFIG_REQUIRED");
+      recordDecision("delegate_qa", input, run.artifactIds || []);
+      const priorQARuns = (store.audit || []).filter((event) => event.runId === run.id && event.type === "agent.started" && event.data?.role === "QA").length;
+      const childRunId = roleRunId(run.id, "QA", priorQARuns + 1);
+      const childContext = { ...baseContext, agentRunId: childRunId, requestedScope: { candidateId: qa.candidateId, candidateHash: qa.candidateHash, qaPreviewId: qa.qaPreviewId || null } };
+      let submitted = null;
+      const runQuality = createPiTool({
+        role: "QA",
+        name: "run_quality_checks",
+        runContext: { ...childContext, grant: { level: "L0" } },
+        toolRuntime,
+        handler: async ({ candidateId, candidateHash, qaPreviewId }) => {
+          if (candidateId !== qa.candidateId || candidateHash !== qa.candidateHash) throw new PolicyError("QA request does not match the current candidate", "STALE_REVISION");
+          if (qa.qaPreviewId && qaPreviewId && qaPreviewId !== qa.qaPreviewId) throw new PolicyError("QA request does not match the server-bound preview", "STALE_REVISION");
+          await qa.assertCurrent?.();
+          const report = await qa.run({
+            ...(qa.input || {}),
+            candidateId,
+            candidateHash,
+            ...(qaPreviewId || qa.qaPreviewId ? { qaPreviewId: qaPreviewId || qa.qaPreviewId } : {}),
+          });
+          await qa.assertCurrent?.();
+          if (!report || report.candidateId !== candidateId || report.candidateHash !== candidateHash) throw new PolicyError("QA report belongs to a different candidate revision", "STALE_REVISION");
+          if (typeof report.reportHash !== "string" || !report.reportHash.trim()) throw new PolicyError("QA report has no report hash", "SCHEMA_REJECTED");
+          submitted = {
+            candidateId,
+            candidateHash,
+            qaPreviewId: report.qaPreviewId || qa.qaPreviewId || null,
+            passed: report.passed === true,
+            reportHash: report.reportHash,
+            results: Array.isArray(report.results) ? report.results : Array.isArray(report.checks) ? report.checks : [],
+          };
+          return { accepted: true, qualityReport: submitted, terminate: true };
+        },
+      });
+      const result = await runtime.runRole({
+        role: "QA",
+        runId: run.id,
+        agentRunId: childRunId,
+        inputSnapshotId,
+        prompt: promptForQA(run, qa),
+        grant: { level: "L0" },
+        artifactType: "QualityReport",
+        persistArtifact: false,
+        tools: [runQuality],
+      });
+      const report = submitted || result.artifact?.output;
+      if (!report) throw new PolicyError("QA did not submit a QualityReport", "AGENT_OUTPUT_MISSING");
+      if (report.candidateId !== qa.candidateId || report.candidateHash !== qa.candidateHash || typeof report.reportHash !== "string") throw new PolicyError("QualityReport does not match the current candidate", "STALE_REVISION");
+      state.qa = report;
+      store.markQuality(qa.candidate.id, { passed: report.passed === true, reportHash: report.reportHash, checks: report.results, qaPreviewId: report.qaPreviewId, candidateHash: report.candidateHash });
+      if (run.reviewCycle?.parentCandidateId === qa.candidate.id && ["awaiting_qa", "qa_failed"].includes(run.reviewCycle.status)) {
+        run.reviewCycle = Object.freeze({ ...run.reviewCycle, status: report.passed ? "awaiting_review" : "qa_failed", qualityReportHash: report.reportHash, updatedAt: new Date().toISOString() });
+      }
+      run.checkpoint = report.passed ? "qa_passed" : "qa_failed";
+      store.recordArtifact(run.id, createArtifact({ type: "QualityReport", role: "QA", runId: run.id, inputRefs: [inputSnapshotId, qa.candidateId, qa.candidateHash, ...(report.qaPreviewId ? [report.qaPreviewId] : [])], output: report, status: report.passed ? "passed" : "failed", risk: "low" }));
+      store.event(run.id, "agent.delegation.completed", { role: "QA", status: report.passed ? "passed" : "failed", candidateId: qa.candidateId, candidateHash: qa.candidateHash, reportHash: report.reportHash });
+      return { status: report.passed ? "qa_passed" : "qa_failed", qualityReport: report };
+    },
+  }) : null;
+
   const delegateReview = review ? delegationTool({
     name: "delegate_review",
     role: "Supervisor",
@@ -674,6 +761,7 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
       if (!state.research && !reviewOnly) throw new PolicyError("Supervisor cannot complete before Research produces ComponentPlan", "PRECONDITION_REQUIRED");
       if (contentCms && !state.content) throw new PolicyError("Supervisor cannot complete before ContentCMS produces ContentModel", "PRECONDITION_REQUIRED");
       if ((codingOnly || repairOnly) && !state.coding) throw new PolicyError("Supervisor cannot complete before Coding produces CodePatch", "PRECONDITION_REQUIRED");
+      if (qaOnly && !state.qa) throw new PolicyError("Supervisor cannot complete before QA produces QualityReport", "PRECONDITION_REQUIRED");
       if (reviewOnly && !state.review) throw new PolicyError("Supervisor cannot complete before Review produces ReviewDecision", "PRECONDITION_REQUIRED");
       recordDecision("complete_plan", input, run.artifactIds || []);
       state.decision = { status: "complete", summary: input.summary };
@@ -685,6 +773,8 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     ? [...(delegateContentCMS ? [delegateContentCMS] : []), requestInput, completePlan]
     : codingOnly || repairOnly
       ? [...(delegateCoding ? [delegateCoding] : []), requestInput, completePlan]
+      : qaOnly
+        ? [...(delegateQA ? [delegateQA] : []), requestInput, completePlan]
       : reviewOnly
         ? [...(delegateReview ? [delegateReview] : []), requestInput, completePlan]
       : [delegateArchitect, ...(delegateResearch ? [delegateResearch] : []), ...(delegateContentCMS ? [delegateContentCMS] : []), requestInput, completePlan];
@@ -696,15 +786,16 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     grant,
     persistArtifact: false,
     prompt: JSON.stringify({
-      task: contentOnly ? "Coordinate the ContentCMS draft stage for the current candidate." : repairOnly ? "Coordinate the bounded Coding repair stage for the current candidate and its Review findings." : codingOnly ? "Coordinate the bounded Coding proposal stage for the current candidate." : reviewOnly ? "Coordinate the independent Review stage for the current candidate." : "Coordinate the first SitePilot creation slice.",
+      task: contentOnly ? "Coordinate the ContentCMS draft stage for the current candidate." : repairOnly ? "Coordinate the bounded Coding repair stage for the current candidate and its Review findings." : codingOnly ? "Coordinate the bounded Coding proposal stage for the current candidate." : qaOnly ? "Coordinate the bounded QA stage for the current candidate preview." : reviewOnly ? "Coordinate the independent Review stage for the current candidate." : "Coordinate the first SitePilot creation slice.",
       goal: run.inputSnapshot.goal,
       currentArtifacts: [],
       availableDelegations: supervisorTools.map((tool) => tool.name),
       rules: [
-        ...(contentOnly ? ["Do not rerun Architect or Research; their frozen artifacts are already available.", "Delegate ContentCMS for this candidate, or request customer input if evidence is insufficient."] : repairOnly ? ["Do not rerun Architect, Research, ContentCMS, or Review. Delegate Coding against the exact ReviewDecision and address every finding.", "Coding may only submit a structured repair CodePatch; it cannot write files, execute commands, request grants, or approve delivery."] : codingOnly ? ["Do not rerun Architect, Research, or ContentCMS; their frozen artifacts and content approval are already available.", "Delegate Coding for this candidate, then stop for reviewer approval. Coding must only submit a structured CodePatch plan."] : reviewOnly ? ["Do not rerun any creation role. Delegate Review for this exact QA-passed candidate, then stop.", "Review is read-only and cannot approve delivery or invoke L1/L2 tools."] : ["Delegate Architect before Research.", "Research can only use the repository and full commit supplied by the server.", "If a strategy exists, delegate research when the tool is available.", "If Research is unavailable, ask for a CodeAtlas repository ID and full commit before completing."]),
+        ...(contentOnly ? ["Do not rerun Architect or Research; their frozen artifacts are already available.", "Delegate ContentCMS for this candidate, or request customer input if evidence is insufficient."] : repairOnly ? ["Do not rerun Architect, Research, ContentCMS, or Review. Delegate Coding against the exact ReviewDecision and address every finding.", "Coding may only submit a structured repair CodePatch; it cannot write files, execute commands, request grants, or approve delivery."] : codingOnly ? ["Do not rerun Architect, Research, or ContentCMS; their frozen artifacts and content approval are already available.", "Delegate Coding for this candidate, then stop for reviewer approval. Coding must only submit a structured CodePatch plan."] : qaOnly ? ["Do not rerun any creation role. Delegate QA for this exact candidate preview, then stop.", "QA is read-only and cannot write files, request grants, modify CMS data, or approve delivery."] : reviewOnly ? ["Do not rerun any creation role. Delegate Review for this exact QA-passed candidate, then stop.", "Review is read-only and cannot approve delivery or invoke L1/L2 tools."] : ["Delegate Architect before Research.", "Research can only use the repository and full commit supplied by the server.", "If a strategy exists, delegate research when the tool is available.", "If Research is unavailable, ask for a CodeAtlas repository ID and full commit before completing."]),
         "Ask the customer when a missing fact blocks a reliable strategy or content model.",
         ...(contentCms ? ["ContentCMS may submit only a validated proposed ContentModel; it must stop for missing customer facts or Claim references."] : []),
         ...(codingOnly || repairOnly ? ["Coding may inspect only the server-provided candidate source manifest and may provide only bounded unified diffs for existing manifest paths; it may not write files or execute commands."] : []),
+        ...(qaOnly ? ["QA may call only the server-provided quality adapter for the exact candidate and preview; it may not write files, execute commands, create CMS drafts, request grants, or publish."] : []),
         ...(reviewOnly ? ["Review may inspect only the server-provided source manifest and QA report; it may not write files, execute commands, create CMS drafts, request grants, or publish."] : []),
         "Do not claim completion until required artifacts are present.",
       ],
@@ -713,8 +804,8 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     tools: supervisorTools,
   });
   const decision = result.output || state.decision || {};
-  const questions = state.questions || (!contentOnly && !codingOnly && !repairOnly && !reviewOnly && !canResearch ? [{ field: "codeAtlasSource", question: "请选择授权的 CodeAtlas 仓库并提供固定的 40 位 commit SHA。", reason: "Research 必须绑定允许列表中的固定代码版本。" }] : []);
-  const status = questions.length ? "needs_input" : state.review ? (state.review.status === "needs_input" ? "needs_input" : state.review.status === "approved" ? "review_approved" : "review_changes_requested") : state.coding ? (state.coding.status === "needs_input" ? "needs_input" : repairOnly ? "repair_patch_ready" : "code_review_required") : state.content ? "content_review_required" : contentOnly ? "content_incomplete" : state.strategy && state.research ? (contentCms ? "ready_for_content" : "ready_for_design") : "needs_input";
+  const questions = state.questions || (!contentOnly && !codingOnly && !repairOnly && !qaOnly && !reviewOnly && !canResearch ? [{ field: "codeAtlasSource", question: "请选择授权的 CodeAtlas 仓库并提供固定的 40 位 commit SHA。", reason: "Research 必须绑定允许列表中的固定代码版本。" }] : []);
+  const status = questions.length ? "needs_input" : state.review ? (state.review.status === "needs_input" ? "needs_input" : state.review.status === "approved" ? "review_approved" : "review_changes_requested") : state.qa ? (state.qa.passed ? "qa_passed" : "qa_failed") : state.coding ? (state.coding.status === "needs_input" ? "needs_input" : repairOnly ? "repair_patch_ready" : "code_review_required") : state.content ? "content_review_required" : contentOnly ? "content_incomplete" : state.strategy && state.research ? (contentCms ? "ready_for_content" : "ready_for_design") : "needs_input";
   run.agentState = {
     status,
     questions: state.questions || decision.questions || questions,
@@ -722,10 +813,10 @@ export async function runCreationSupervisor({ run, runtime, store, registry, cod
     artifactIds: (run.artifactIds || []).slice(),
     lastDecision: decision,
   };
-  run.checkpoint = status === "needs_input" ? "agent_needs_input" : state.review?.status === "changes_requested" ? "review_changes_requested" : state.review ? "independent_review_completed" : state.coding ? (repairOnly ? "repair_ready_for_execution" : "code_patch_review_required") : state.content ? "content_review_required" : contentOnly ? "content_agent_incomplete" : "agent_strategy_research_ready";
+  run.checkpoint = status === "needs_input" ? "agent_needs_input" : state.review?.status === "changes_requested" ? "review_changes_requested" : state.review ? "independent_review_completed" : state.qa ? (state.qa.passed ? "qa_passed" : "qa_failed") : state.coding ? (repairOnly ? "repair_ready_for_execution" : "code_patch_review_required") : state.content ? "content_review_required" : contentOnly ? "content_agent_incomplete" : "agent_strategy_research_ready";
   store.event(run.id, "supervisor.completed", { status, artifactCount: run.artifactIds?.length || 0, delegations: state.delegations });
   store.persist?.();
-  return { status, decision, strategy: state.strategy, research: state.research, contentModel: state.content, codePatch: state.coding, reviewDecision: state.review, reviewDecisionHash: state.review ? reviewDecisionHash(state.review) : null, reviewCycle: run.reviewCycle || null, independent_review_required: Boolean(reviewOnly), review_approved: state.review?.status === "approved", review_changes_requested: state.review?.status === "changes_requested", questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
+  return { status, decision, strategy: state.strategy, research: state.research, contentModel: state.content, codePatch: state.coding, qualityReport: state.qa, reviewDecision: state.review, reviewDecisionHash: state.review ? reviewDecisionHash(state.review) : null, reviewCycle: run.reviewCycle || null, independent_review_required: Boolean(reviewOnly), review_approved: state.review?.status === "approved", review_changes_requested: state.review?.status === "changes_requested", qa_passed: state.qa?.passed === true, questions: run.agentState.questions, artifacts: store.artifactsForRun(run.id) };
 }
 
 export function createAgentToolRuntime(store, journal = null) {

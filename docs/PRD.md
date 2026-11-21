@@ -24,6 +24,7 @@
 | 1.0 | 2026-10-24 | 记录首条 Pi 多 Agent 创建闭环的实现状态、测试边界及后续角色扩展顺序 | 项目作者 |
 | 1.1 | 2026-10-25 | 增加候选级 Payload worktree 绑定、来源清单漂移检测、真实构建回执和打包硬门禁；明确未配置隔离构建时仍只能称为静态 scaffold | 项目作者 |
 | 1.2 | 2026-10-25 | 补齐 Studio 受控自然语言设计反馈、不可变版本历史与字段差异摘要；反馈服务端仅转换为白名单 CanvasPatch，不识别的要求停在澄清 | 项目作者 |
+| 1.3 | 2026-11-21 | 将 QA 作为 Pi Supervisor 的独立只读阶段接入；质量报告绑定候选 hash 和 Payload 预览，并在构建/预览门禁后才能进入独立 Review | 项目作者 |
 
 ## 1. 一句话定义
 
@@ -1330,7 +1331,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 
 接下来的项目按“先贯通一条客户可见的创建闭环，再扩大到生产与维护”推进。自然语言建站是当前产品主线；`cms-agent-platform-plan.md` 提供维护模式和共享工程内核的设计，不要求首轮同时交付 GitHub Issue 自动修复、PostHog、自托管整套监控或自动 PR。
 
-当前代码进度按 **PRD Draft 1.2** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的设计入口支持隔离只读 iframe、页面/视口切换、不可变设计版本历史和相对父版本的字段差异摘要；客户可以提交受控自然语言反馈（标题、描述、按钮文案、主色、全站留白），服务端只把可识别表达转换成白名单 `CanvasPatch`，不识别的要求停在澄清，旧版本不能继续反馈或生成候选。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：配置管理员创建带 `Internal=true` 且带 `sitepilot.preview=true` 标签的专用 Docker 网络后，L2-only `POST /candidates/:id/payload-preview/start` 会在只读、资源受限容器中启动当前候选，探测 Payload 身份端点后生成短期 opaque preview ID 并由 Playwright 校验候选 hash；`DELETE /candidates/:id/payload-preview` 可停止 lease。仍保留手工登记 loopback runner 的兼容接口。预览接口不提供公网 URL、不允许发布和写入。真实 Docker 构建、依赖缓存、持久化客户预览服务和独立 Review 仍需继续验收，不能把接口存在记成生产交付已完成。
+当前代码进度按 **PRD Draft 1.3** 推进；候选级 Payload worktree 绑定和构建门禁已实现。Studio 的设计入口支持隔离只读 iframe、页面/视口切换、不可变设计版本历史和相对父版本的字段差异摘要；客户可以提交受控自然语言反馈（标题、描述、按钮文案、主色、全站留白），服务端只把可识别表达转换成白名单 `CanvasPatch`，不识别的要求停在澄清，旧版本不能继续反馈或生成候选。Studio 的 QA 路径现区分结构预览与真实 Payload 预览：配置管理员创建带 `Internal=true` 且带 `sitepilot.preview=true` 标签的专用 Docker 网络后，L2-only `POST /candidates/:id/payload-preview/start` 会在只读、资源受限容器中启动当前候选，探测 Payload 身份端点后生成短期 opaque preview ID 并由 Playwright 校验候选 hash；`DELETE /candidates/:id/payload-preview` 可停止 lease。Agent API 另提供 `phase=qa`，由 QA 子 Agent 调用只读质量适配器并保存候选绑定的 `QualityReport`，之后才能进入独立 Review。仍保留手工登记 loopback runner 的兼容接口。预览接口不提供公网 URL、不允许发布和写入。真实 Docker 构建、依赖缓存和持久化客户预览服务仍需继续验收，不能把接口存在记成生产交付已完成。
 
 | 能力 | 当前经仓库/CI 记录的状态 | 本次迭代判断 |
 |---|---|---|
@@ -1338,7 +1339,7 @@ flaky 检查在同一环境最多重跑 2 次，并同时展示全部结果；�
 | Payload Website Template 固定源码构建、临时 CMS 草稿、桌面/手机预览和路由生成 | GitHub Actions 有合成数据成功记录；这是 CI 验收，不是客户可用的常驻预览服务 | 补齐类型诊断、真实客户需求接入和预览交付 |
 | 自然语言需求到 RequirementBrief / SiteStrategy / DesignDraft | 已有服务端模型 intake、RequirementBrief 原文引用校验、确认后创建 Project/Run；Pi Architect 可在独立 Supervisor 流程生成 SiteStrategy 和受限 DesignTokens；创建设计草稿会继承令牌并在 Studio 显示方向与调色板；Studio 已支持版本历史、字段差异摘要和受控自然语言反馈到 CanvasPatch | 接通受审组件到初步页面预览，并验证真实候选反馈迭代 |
 | Studio 模型设置 | 已支持输入 URL、模型、Key、Chat Completions/Responses 协议，连接测试和当前进程内存配置；Pi Agent 复用这份配置，Key 不回显、不落库；本机 Responses 探针与合成需求解析通过 | 增加角色级模型配置及托管部署的密钥管理策略 |
-| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。候选级 Payload 构建接口已要求绑定 worktree、candidate hash 和一次性 `build_payload_candidate` grant，生成阶段会写入受控 Payload 文件并生成漂移检测清单，成功回执才允许 `packageReview`。尚无真实在线模型多角色运行记录 | 用真实 Docker/固定镜像跑通该绑定候选，再接 QA 与独立 Review |
+| Pi Agent 多角色运行时 | 已固定 Pi 依赖并实现 Supervisor→Architect→Research；ContentCMS 校验当前 DesignDraft/PagePlan、Claim 引用并仅产出 proposed ContentModel，L0 不可调用 L1 Payload 写工具。reviewer 可批准精确 candidate/design/content hash。受限 Coding 阶段要求内容已审核、当前 candidate 构建通过；只读检查候选 worktree 中的 manifest 文件，产出绑定 candidate/design/source hash 的 CodePatch 提案，文件只能是已有清单路径且必须携带受限 unified diff，不提供文件写入、shell 或构建权限。QA 现在通过 `phase=qa` 由独立 QA 子 Agent 调用只读质量适配器，报告绑定 candidate/preview hash；`phase=review` 仍要求 QA 通过后由独立 Review 子 Agent 审查。reviewer-only 审批绑定 candidate/design/page-plan/content/source/patch hash，重复同 hash 幂等，且明确 `executionGranted: false`；Studio 提供审核和一次性 L2 执行入口。候选级 Payload 构建接口已要求绑定 worktree、candidate hash 和一次性 `build_payload_candidate` grant，生成阶段会写入受控 Payload 文件并生成漂移检测清单，成功回执才允许 `packageReview`。尚无真实在线模型多角色运行记录 | 用真实 Docker/固定镜像跑通该绑定候选，再做完整 QA/Review 线上验收 |
 | 客户画布修改与 Payload 区块映射 | 本地 Chrome 已验收改文案、区块排序、创建新版和旧候选失效 | 用新草稿构建真实 Payload 候选，验证页面顺序与字段 |
 | 客户反馈生成新候选、可访问预览 URL、版本回滚 | 设计反馈已生成 child DesignDraft 并保留 hash/patch；尚未绑定 Payload 候选和可访问预览 URL | 接入真实代码/CMS 候选后完成端到端验收 |
 | GitHub Issue → worktree → 独立 Review → PR / PostHog 闭环 | 属于 `cms-agent-platform-plan.md` 的维护模式，当前未形成生产闭环 | 放在创建模式稳定之后 |

@@ -227,6 +227,76 @@ test("Pi Supervisor dispatches a bounded ContentCMS model after the frozen desig
   assert.equal(blocked.body.artifacts.filter((artifact) => artifact.type === "ContentModel").length, 2);
 });
 
+test("QA phase dispatches a candidate-bound read-only QualityReport", async () => {
+  const store = new SitePilotStore();
+  const project = store.createProject({ goal: "Run QA for a generated website", locale: ["en"] });
+  const run = store.createRun(project.id);
+  run.strategy = { pageHierarchy: ["home"], blocks: ["Hero"], locales: ["en"] };
+  run.research = { repository: "payload", commit: "a".repeat(40), componentPlan: { decisions: [] }, evidence: [] };
+  run.pagePlan = { routes: [{ page: "home", route: "/", components: [{ name: "Hero", registryId: "hero", source: { repository: "payload", commit: "a".repeat(40), path: "Hero.tsx" } }] }] };
+  const design = store.createDesignDraft(run.id);
+  const candidate = store.createCandidate(run.id, {
+    designDraftId: design.id,
+    build: { passed: true },
+    codeArtifact: { designHash: design.designHash },
+  });
+  const qualityCalls = [];
+  const quality = {
+    run: async (input) => {
+      qualityCalls.push(input);
+      return {
+        candidateId: input.candidateId,
+        candidateHash: input.candidateHash,
+        passed: true,
+        reportHash: "qa_agent_report_1",
+        results: [{ check: "links", passed: true }],
+      };
+    },
+  };
+  const faux = fauxProvider({ models: [{ id: "test-model" }] });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("delegate_qa", { whyNow: "候选构建已完成，需要验证页面质量", expectedObservation: "得到绑定候选 hash 的质量报告", stopIf: ["候选版本变化"], risk: "low" }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("run_quality_checks", { candidateId: candidate.id, candidateHash: candidate.candidateHash }), { stopReason: "toolUse" }),
+    fauxAssistantMessage(fauxToolCall("complete_plan", { whyNow: "质量报告已经写入候选", expectedObservation: "通过后可进入独立 Review", stopIf: ["质量报告 hash 不匹配"], risk: "low", summary: "QA 完成" }), { stopReason: "toolUse" }),
+  ]);
+  const server = createServer(
+    store,
+    { apiToken, reviewerToken, reviewerId: "reviewer" },
+    undefined,
+    undefined,
+    null,
+    null,
+    quality,
+    null,
+    undefined,
+    null,
+    null,
+    (config) => ({ endpoint: config.baseUrl, modelVersion: config.model, apiMode: config.apiMode, testConnection: async () => ({}) }),
+    () => ({ model: faux.getModel(), streamFn: (model, context, options) => models.streamSimple(model, context, options) }),
+  );
+  assert.equal((await request(server, "POST", "/model/config", apiToken, { baseUrl: "https://model.example/v1", model: "test-model", apiMode: "chat_completions", apiKey: "test-secret" })).status, 200);
+  const result = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "qa", candidateId: candidate.id, routes: ["/"], locales: ["en"] });
+  assert.equal(result.status, 200, JSON.stringify(result.body));
+  assert.equal(result.body.status, "qa_passed");
+  assert.equal(result.body.qa_passed, true);
+  assert.equal(result.body.qualityReport.candidateHash, candidate.candidateHash);
+  assert.equal(candidate.quality.reportHash, "qa_agent_report_1");
+  assert.deepEqual(qualityCalls, [{ candidateId: candidate.id, candidateHash: candidate.candidateHash, routes: ["/"], locales: ["en"] }]);
+  assert.equal(store.artifactsForRun(run.id).filter((artifact) => artifact.type === "QualityReport").length, 1);
+  assert.equal(run.checkpoint, "qa_passed");
+
+  const payloadCandidate = store.createCandidate(run.id, {
+    designDraftId: design.id,
+    build: { passed: true, requiresPayloadBuild: true },
+    codeArtifact: { designHash: design.designHash },
+  });
+  const blocked = await request(server, "POST", `/runs/${run.id}/agent`, apiToken, { phase: "qa", candidateId: payloadCandidate.id });
+  assert.equal(blocked.status, 422);
+  assert.equal(blocked.body.code, "BUILD_GATE_REQUIRED");
+});
+
 test("Review phase requires QA and persists a candidate-bound independent decision", async () => {
   const store = new SitePilotStore();
   const project = store.createProject({ goal: "Review a generated website", locale: ["en"] });

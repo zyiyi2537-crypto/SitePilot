@@ -11,7 +11,7 @@ export const AGENT_ROLES = Object.freeze([
 ]);
 
 export const ROLE_POLICIES = Object.freeze({
-  Supervisor: Object.freeze({ tools: ["delegate_architect", "delegate_research", "delegate_content_cms", "delegate_coding", "delegate_review", "request_customer_input", "complete_plan"], writes: ["artifacts", "task_state"], risk: "medium" }),
+  Supervisor: Object.freeze({ tools: ["delegate_architect", "delegate_research", "delegate_content_cms", "delegate_coding", "delegate_qa", "delegate_review", "request_customer_input", "complete_plan"], writes: ["artifacts", "task_state"], risk: "medium" }),
   Architect: Object.freeze({ tools: ["submit_site_strategy"], writes: ["SiteStrategy", "PagePlan", "DesignTokens"], risk: "low" }),
   Research: Object.freeze({ tools: ["retrieve_codeatlas", "submit_component_plan"], writes: ["ComponentPlan", "evidence"], risk: "low" }),
   ContentCMS: Object.freeze({ tools: ["inspect_payload_schema", "submit_content_model", "create_payload_draft"], writes: ["ContentModel", "payload_sandbox"], risk: "medium" }),

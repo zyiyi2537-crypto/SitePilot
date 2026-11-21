@@ -20,6 +20,7 @@ const descriptions = {
   delegate_research: "Ask the Research child agent to inspect the supplied repository and commit.",
   delegate_content_cms: "Ask the ContentCMS child agent to validate a bounded content model for the current design.",
   delegate_coding: "Ask the Coding child agent to submit a candidate-bound, read-only code patch plan.",
+  delegate_qa: "Ask the QA child agent to run read-only checks for the current candidate preview.",
   delegate_review: "Ask the independent Review child agent to inspect the current candidate and QA evidence.",
   request_customer_input: "Pause the run and return up to three questions that need customer input.",
   complete_plan: "Finish the current planning stage after required artifacts are available.",
@@ -40,6 +41,7 @@ const SAFE_TOOL_NAMES = new Set([
   "submit_review_decision",
   "inspect_source_package",
   "delegate_coding",
+  "delegate_qa",
   "delegate_review",
   "delegate_architect",
   "delegate_research",
@@ -111,6 +113,7 @@ const schemas = {
   }),
   delegate_content_cms: Type.Object(decisionFields()),
   delegate_coding: Type.Object(decisionFields()),
+  delegate_qa: Type.Object(decisionFields()),
   delegate_review: Type.Object(decisionFields()),
   request_customer_input: Type.Object({
     ...decisionFields(),

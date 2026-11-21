@@ -8,6 +8,7 @@ export const TOOLS = new Map([
   ["delegate_research", "L0"],
   ["delegate_content_cms", "L0"],
   ["delegate_coding", "L0"],
+  ["delegate_qa", "L0"],
   ["delegate_review", "L0"],
   ["request_customer_input", "L0"],
   ["complete_plan", "L0"],
